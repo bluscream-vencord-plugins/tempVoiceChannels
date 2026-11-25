@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import { PATTERNS } from "./patterns";
+
 // Works on both raw gateway components (custom_id) and store components (customId).
 export interface Component {
     type: number;
@@ -38,5 +40,5 @@ export function findComponent(list: unknown[] | undefined, customId: string) {
 }
 
 export function getText(list: unknown[] | undefined) {
-    return [...walkComponents(list)].filter(c => c.type === 10 && c.content).map(c => c.content).join("\n");
+    return [...walkComponents(list)].filter(c => c.type === PATTERNS.componentTypes.textDisplay && c.content).map(c => c.content).join("\n");
 }
