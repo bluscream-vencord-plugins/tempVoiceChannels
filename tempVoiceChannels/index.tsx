@@ -391,7 +391,6 @@ export default definePlugin({
                     key={`${server.name}-heading`}
                     id={`vc-tempvoice-toolbox-${server.name}`}
                     label={<b>{guild?.name ?? server.name}</b>}
-                    subtext="Click to edit presets"
                     leadingAccessory={iconUrl ? { type: "image", src: iconUrl } : undefined}
                     icon={PencilIcon}
                     action={() => openPluginModal(plugins[server.name])}
