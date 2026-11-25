@@ -18,6 +18,8 @@ import { OptionType } from "@utils/types";
 import type { Channel } from "@vencord/discord-types";
 import { ChannelStore, GuildChannelStore, lodash, React, Select, SnowflakeUtils, TextInput, useCallback, useEffect, useRef, useState } from "@webpack/common";
 
+import { PATTERNS } from "./patterns";
+
 const cl = classNameFactory("vc-tempvoice-");
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -27,7 +29,7 @@ const DAY = 24 * 60 * 60 * 1000;
  * channel made in the last day is a temp channel even if a preset put a ➕ in its name.
  */
 export const isCreatorChannel = (channel: Channel | undefined) =>
-    !!channel && channel.name.includes("➕") && Date.now() - SnowflakeUtils.extractTimestamp(channel.id) > DAY;
+    !!channel && channel.name.includes(PATTERNS.creatorMarker) && Date.now() - SnowflakeUtils.extractTimestamp(channel.id) > DAY;
 
 export function getCreators(guildId: string): Channel[] {
     const { VOCAL = [] } = GuildChannelStore.getChannels(guildId);
