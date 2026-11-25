@@ -9,7 +9,9 @@ import definePlugin from "@utils/types";
 import { ChannelStore, showToast } from "@webpack/common";
 
 import { registerServer, TempVoiceServer, unregisterServer } from "../tempVoiceChannels";
+import { PATTERNS as CORE_PATTERNS } from "../tempVoiceChannels/patterns";
 import { isPanel, parseActivision, parseLogs } from "./parsers";
+import { PATTERNS } from "./patterns";
 import { settings } from "./settings";
 
 const server: TempVoiceServer = {
@@ -18,8 +20,7 @@ const server: TempVoiceServer = {
     botId: () => settings.store.botId,
     presets: () => settings.store.presets,
     isPanel: m => isPanel(m.components),
-    // "🎮 Kanal erstellt von: @owner"
-    isCreatedNotice: (m, userId) => m.content.includes("Kanal erstellt von") && new RegExp(`<@!?${userId}>`).test(m.content),
+    isCreatedNotice: (m, userId) => m.content.includes(PATTERNS.createdNotice) && CORE_PATTERNS.mention(userId).test(m.content),
 
     async applyPreset(api, channelId, preset) {
         await api.pause(1500, 2500);
@@ -32,7 +33,8 @@ const server: TempVoiceServer = {
         if (preset.name || preset.status) {
             const name = (preset.name || ChannelStore.getChannel(channelId)?.name || "").trim();
             await api.pause(1500, 2500);
-            const renamed = await api.submitModal(panel, "rename_button", "rename_modal", { channel_name: name, channel_status: preset.status },
+            const renamed = await api.submitModal(panel, PATTERNS.buttons.rename, PATTERNS.modals.rename.id,
+                { [PATTERNS.modals.rename.name]: name, [PATTERNS.modals.rename.status]: preset.status },
                 () => ChannelStore.getChannel(channelId)?.name.trim() === name, "Rename");
             if (!renamed) return;
         }
@@ -40,21 +42,22 @@ const server: TempVoiceServer = {
         if (preset.limit) {
             const { limit } = preset;
             await api.pause(1500, 2500);
-            const limited = await api.submitModal(panel, "limit_button", "limit_modal", { channel_limit: String(limit) },
+            const limited = await api.submitModal(panel, PATTERNS.buttons.limit, PATTERNS.modals.limit.id,
+                { [PATTERNS.modals.limit.limit]: String(limit) },
                 () => ChannelStore.getChannel(channelId)?.userLimit === limit, "Setting the user limit");
             if (!limited) return;
         }
 
         if (preset.privacy !== "unchanged") {
             await api.pause(1500, 2500);
-            await api.clickButton(panel, preset.privacy === "private" ? "private_button" : "public_button");
+            await api.clickButton(panel, preset.privacy === "private" ? PATTERNS.buttons.private : PATTERNS.buttons.public);
         }
 
         if (settings.store.clickPanelOnCreate) {
             await api.pause(2000, 3000);
-            await api.clickButton(panel, "logs_button", parseLogs);
+            await api.clickButton(panel, PATTERNS.buttons.logs, parseLogs);
             await api.pause(2500, 3500);
-            await api.clickButton(panel, "activision_button", parseActivision);
+            await api.clickButton(panel, PATTERNS.buttons.activision, parseActivision);
             await api.pause(800, 1200);
             api.scrollToBottom();
         }
@@ -66,7 +69,7 @@ const server: TempVoiceServer = {
         if (!panel) return;
         api.openChat();
         await api.pause(1500, 2500);
-        const entries = await api.clickButton(panel, "activision_button", parseActivision);
+        const entries = await api.clickButton(panel, PATTERNS.buttons.activision, parseActivision);
         await api.pause(800, 1200);
         api.scrollToBottom();
         if (!entries) return api.fail("The bot didn't send any Activision IDs.");
