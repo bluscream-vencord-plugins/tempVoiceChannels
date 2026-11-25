@@ -10,6 +10,8 @@ import { Logger } from "@utils/Logger";
 import { sleep } from "@utils/misc";
 import { GuildMemberStore, UserProfileStore, UserStore } from "@webpack/common";
 
+import { rememberIds } from "./idStore";
+
 const logger = new Logger("TempVoiceChannels");
 
 /** A kind of ID to look for in profiles, like an Activision ID. See PATTERNS.idKinds for the built-in ones. */
@@ -66,10 +68,17 @@ function profileText(userId: string, guildId: string) {
     ].filter(Boolean).join("\n");
 }
 
+/** The IDs of one kind in a user's loaded profiles, remembered for later. */
+function profileIds(userId: string, guildId: string, kind: IdKind) {
+    const ids = findIds(profileText(userId, guildId), kind);
+    rememberIds(userId, ids.map(id => ({ id, source: `${kind.label} from their profile` })));
+    return ids;
+}
+
 /** Looks up one kind of ID in a user's profiles, loading them first if they aren't cached. */
 export async function lookupIds(userId: string, guildId: string, kind: IdKind) {
     await loadProfiles(userId, guildId);
-    return findIds(profileText(userId, guildId), kind);
+    return profileIds(userId, guildId, kind);
 }
 
 /**
@@ -81,7 +90,7 @@ export function cachedIds(userId: string, guildId: string, kind: IdKind) {
         loadProfiles(userId, guildId);
         return null;
     }
-    return findIds(profileText(userId, guildId), kind);
+    return profileIds(userId, guildId, kind);
 }
 
 /** Users already scanned in a channel, so they aren't posted again until you leave it. */
@@ -108,10 +117,9 @@ export async function scanProfiles(
         scanned.add(key);
 
         await loadProfiles(userId, guildId);
-        const text = profileText(userId, guildId);
         const known = new Set(knownIds(userId).map(id => id.toLowerCase()));
         const lines = kinds.flatMap(kind => {
-            const ids = findIds(text, kind).filter(id => !known.has(id.toLowerCase()));
+            const ids = profileIds(userId, guildId, kind).filter(id => !known.has(id.toLowerCase()));
             if (!ids.length) return [];
             return [`${kind.label}${ids.length > 1 ? "s" : ""} of <@${userId}> from their profile: ${ids.map(id => `\`${id}\``).join(", ")}`];
         });

@@ -7,7 +7,10 @@
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { plugins } from "@api/PluginManager";
 import { definePluginSettings } from "@api/Settings";
+import { Button } from "@components/Button";
+import { Flex } from "@components/Flex";
 import { PencilIcon } from "@components/Icons";
+import { Paragraph } from "@components/Paragraph";
 import { openPluginModal } from "@components/settings/tabs/plugins/PluginModal";
 import { Logger } from "@utils/Logger";
 import { sleep } from "@utils/misc";
@@ -15,16 +18,34 @@ import definePlugin, { OptionType } from "@utils/types";
 import { copyWithToast } from "@utils/discord";
 import type { Channel, FluxEvents, Guild, Message, User } from "@vencord/discord-types";
 import { findByCodeLazy } from "@webpack";
-import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageActions, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, VoiceStateStore } from "@webpack/common";
+import { Alerts, AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageActions, MessageStore, moment, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, useState, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
 import { PATTERNS } from "./patterns";
 import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
+import { clearRememberedIds, loadRememberedIds, rememberedCount, rememberedIds } from "./idStore";
 import { cachedIds, forgetScanned, IdKind, scanProfiles } from "./profileScanner";
 
 const logger = new Logger("TempVoiceChannels");
 
 const executeComponent: (args: Record<string, unknown>) => Promise<void> = findByCodeLazy(...PATTERNS.webpack.executeComponent);
+
+function ClearRememberedIds() {
+    const [{ users, ids }, setCount] = useState(rememberedCount);
+    const clear = () => Alerts.show({
+        title: "Forget all remembered IDs?",
+        body: `This removes ${ids} IDs of ${users} people from this computer. It can't be undone.`,
+        confirmText: "Forget them",
+        cancelText: "Cancel",
+        onConfirm: () => clearRememberedIds().then(() => setCount(rememberedCount()))
+    });
+    return (
+        <Flex alignItems="center" gap="1em">
+            <Paragraph>{ids} IDs of {users} people remembered.</Paragraph>
+            <Button variant="dangerSecondary" size="small" disabled={!ids} onClick={clear}>Forget all</Button>
+        </Flex>
+    );
+}
 
 const settings = definePluginSettings({
     actionDelay: {
@@ -43,6 +64,15 @@ const settings = definePluginSettings({
         type: OptionType.BOOLEAN,
         description: "When you join a channel with people, or someone joins yours, look for IDs like Activision IDs in their server and global profiles and show them in the channel chat, only visible to you.",
         default: true
+    },
+    rememberIds: {
+        type: OptionType.BOOLEAN,
+        description: "Remember every ID found for someone, from profiles or a server's bot, even after they remove it. Stored only on this computer, and used for the Copy ID menu.",
+        default: true
+    },
+    clearRememberedIds: {
+        type: OptionType.COMPONENT,
+        component: ClearRememberedIds
     },
     openChat: {
         type: OptionType.BOOLEAN,
@@ -457,24 +487,27 @@ const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { chann
     if (isCreatorChannel(channel) || presets.length) children.push(<Menu.MenuSeparator />, createMenu(server, presets, false));
 };
 
-// Right-clicking someone who's in voice on a registered server: copy any ID known for them.
+// Right-clicking someone who's in voice on a registered server, or whose IDs were remembered: copy any ID known for them.
 const userMenu: NavContextMenuPatchCallback = (children, { user }: { user?: User; }) => {
     if (!user) return;
     const voiceChannel = VoiceStateStore.getVoiceStateForUser(user.id)?.channelId;
     const server = serverFor(voiceChannel ? ChannelStore.getChannel(voiceChannel)?.guild_id : undefined);
-    if (!server || (!server.profileIds?.length && !server.otherIds)) return;
+    const remembered = rememberedIds(user.id);
+    if (!remembered.length && (!server || (!server.profileIds?.length && !server.otherIds))) return;
 
     const found = new Map<string, { id: string; source: string; }>();
     const add = (id: string, source: string) => {
         if (!found.has(id.toLowerCase())) found.set(id.toLowerCase(), { id, source });
     };
-    server.otherIds?.(user.id).forEach(({ id, source }) => add(id, source));
+    // What can be seen right now comes first, then remembered IDs that are gone from everywhere.
+    server?.otherIds?.(user.id).forEach(({ id, source }) => add(id, source));
     let loading = false;
-    for (const kind of server.profileIds ?? []) {
-        const ids = cachedIds(user.id, server.guildId(), kind);
+    for (const kind of server?.profileIds ?? []) {
+        const ids = cachedIds(user.id, server?.guildId() ?? "", kind);
         if (ids) ids.forEach(id => add(id, `${kind.label} from their profile`));
         else loading = true;
     }
+    for (const { id, source, lastSeen } of remembered) add(id, `${source}, last seen ${moment(lastSeen).fromNow()}`);
 
     const idPrefix = `vc-tempvoice-copy-id-${user.id}`;
     children.push(
