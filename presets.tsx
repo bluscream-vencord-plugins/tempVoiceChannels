@@ -16,17 +16,22 @@ import { Span } from "@components/Span";
 import { classNameFactory } from "@utils/css";
 import { OptionType } from "@utils/types";
 import type { Channel } from "@vencord/discord-types";
-import { ChannelStore, GuildChannelStore, React, Select, TextInput, useCallback, useRef, useState } from "@webpack/common";
-
+import { ChannelStore, GuildChannelStore, lodash, React, Select, SnowflakeUtils, TextInput, useCallback, useEffect, useRef, useState } from "@webpack/common";
 
 const cl = classNameFactory("vc-tempvoice-");
 
-/** Both bots mark their create channels with a ➕ in the name. */
-export const isCreatorName = (name: string) => name.includes("➕");
+const DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Both bots mark their create channels with a ➕ in the name. Create channels are permanent, so a
+ * channel made in the last day is a temp channel even if a preset put a ➕ in its name.
+ */
+export const isCreatorChannel = (channel: Channel | undefined) =>
+    !!channel && channel.name.includes("➕") && Date.now() - SnowflakeUtils.extractTimestamp(channel.id) > DAY;
 
 export function getCreators(guildId: string): Channel[] {
     const { VOCAL = [] } = GuildChannelStore.getChannels(guildId);
-    return VOCAL.map(({ channel }) => channel).filter(c => isCreatorName(c.name));
+    return VOCAL.map(({ channel }) => channel).filter(isCreatorChannel);
 }
 
 export function creatorLabel(creatorId: string) {
@@ -36,7 +41,10 @@ export function creatorLabel(creatorId: string) {
     return category ? `${category} › ${creator.name}` : creator.name;
 }
 
-export type Privacy = "unchanged" | "private" | "public";
+/** A preset's name, or its create channel when it has none. Used everywhere presets are listed. */
+export const presetTitle = (preset: Preset) => preset.name || creatorLabel(preset.creatorId);
+
+export type Privacy ="unchanged" | "private" | "public";
 
 export interface Preset {
     id: string;
@@ -64,9 +72,33 @@ const PRIVACY_OPTIONS: { label: string; value: Privacy; }[] = [
 // Presets saved before limit and privacy existed lack these fields.
 export const withDefaults = (p: Preset): Preset => ({ ...p, limit: p.limit ?? 0, privacy: p.privacy ?? "unchanged" });
 
+// Saves on blur, on Enter and when the settings close, and shows the saved value again afterwards (e.g. a clamped limit).
 function Input({ value, placeholder, onCommit }: { value: string; placeholder: string; onCommit(value: string): void; }) {
     const [draft, setDraft] = useState(value);
-    return <TextInput value={draft} placeholder={placeholder} onChange={setDraft} onBlur={() => draft !== value && onCommit(draft)} />;
+    const latest = useRef({ draft, value, onCommit });
+    latest.current = { draft, value, onCommit };
+
+    useEffect(() => setDraft(value), [value]);
+    useEffect(() => () => {
+        const { draft, value, onCommit } = latest.current;
+        if (draft !== value) onCommit(draft);
+    }, []);
+
+    const commit = () => {
+        if (draft !== value) onCommit(draft);
+        // If the saved value doesn't change (e.g. "abc" as a limit stays 0), show it again instead of the typed text.
+        setDraft(value);
+    };
+
+    return (
+        <TextInput
+            value={draft}
+            placeholder={placeholder}
+            onChange={setDraft}
+            onBlur={commit}
+            onKeyDown={(e: React.KeyboardEvent) => e.key === "Enter" && commit()}
+        />
+    );
 }
 
 interface Drop { index: number; after: boolean; }
@@ -110,7 +142,7 @@ function PresetForm({ preset, creators, fields, onUpdate, onDelete }: PresetForm
                     <Input
                         value={preset.limit ? String(preset.limit) : ""}
                         placeholder="Leave empty for the bot's default"
-                        onCommit={v => onUpdate({ limit: Math.max(0, Math.min(99, parseInt(v) || 0)) })}
+                        onCommit={v => onUpdate({ limit: lodash.clamp(parseInt(v) || 0, 0, 99) })}
                     />
                 </>}
                 {fields.privacy && <>
@@ -159,19 +191,21 @@ function makePresetEditor({ guildId, fields, description, usePresets, savePreset
         const add = () => {
             const id = crypto.randomUUID();
             setAdded(id);
-            savePresets([...presets, { id, name: "", status: "", creatorId: creators[0]?.value ?? "", limit: 0, privacy: "unchanged" }]);
+            savePresets([...presets, { id, name: "", status: "", creatorId: creators[0].value, limit: 0, privacy: "unchanged" }]);
         };
 
+        // Only our own preset drags are droppable; files or text dragged in from elsewhere are ignored.
         const onDragOver = (index: number) => (e: React.DragEvent) => {
-            e.preventDefault();
             if (dragged === null) return;
+            e.preventDefault();
             const rect = e.currentTarget.getBoundingClientRect();
             const after = e.clientY - rect.top > rect.height / 2;
             if (drop?.index !== index || drop.after !== after) setDrop({ index, after });
         };
         const onDrop = (e: React.DragEvent) => {
+            if (dragged === null) return;
             e.preventDefault();
-            if (dragged !== null && drop) {
+            if (drop) {
                 let target = drop.index + (drop.after ? 1 : 0);
                 if (target > dragged) target--;
                 if (target !== dragged) {
@@ -212,24 +246,25 @@ function makePresetEditor({ guildId, fields, description, usePresets, savePreset
                                     onDragStart={e => { setDragged(index); e.dataTransfer.setData("text/plain", String(index)); }}
                                     onDragEnd={() => { setDragged(null); setDrop(null); }}
                                 >
-                                    <Paragraph weight="medium" size="md">{preset.name || `Preset ${index + 1}`}</Paragraph>
+                                    <Paragraph weight="medium" size="md">{presetTitle(preset)}</Paragraph>
                                     <Paragraph size="sm">{summary(preset)}</Paragraph>
                                 </div>
                             </PresetCard>
                         </div>
                     ))}
-                    <Button onClick={add}>Add Preset</Button>
+                    {creators.length
+                        ? <Button onClick={add}>Add Preset</Button>
+                        : <Paragraph>No create channels found on this server, so presets can't be added right now.</Paragraph>}
                 </Flex>
             </section>
         );
     };
 }
 
-interface ServerSettingsOptions extends Omit<EditorOptions, "guildId"> {
+interface ServerSettingsOptions extends EditorOptions {
     defaultGuildId: string;
     defaultBotId: string;
     defaultPresets: Preset[];
-    guildId(): string;
 }
 
 /**
@@ -245,7 +280,7 @@ export function serverSettings(options: ServerSettingsOptions) {
         presets: {
             type: OptionType.CUSTOM as const,
             description: "Channel presets.",
-            default: options.defaultPresets satisfies Preset[]
+            default: options.defaultPresets
         },
         guildId: {
             type: OptionType.STRING as const,

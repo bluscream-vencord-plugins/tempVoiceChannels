@@ -13,23 +13,23 @@ import { Logger } from "@utils/Logger";
 import { sleep } from "@utils/misc";
 import definePlugin, { OptionType } from "@utils/types";
 import type { Channel, FluxEvents, Guild, Message } from "@vencord/discord-types";
-import { findByCodeLazy, findByPropsLazy } from "@webpack";
-import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, VoiceStateStore } from "@webpack/common";
+import { findByCodeLazy } from "@webpack";
+import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageActions, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
-import { creatorLabel, isCreatorName, Preset, withDefaults } from "./presets";
+import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
 
 const logger = new Logger("TempVoiceChannels");
 
 const executeComponent: (args: Record<string, unknown>) => Promise<void> = findByCodeLazy("unarchiveThreadIfNecessary", "MESSAGE_COMPONENT");
-const MessageActions = findByPropsLazy("fetchMessages", "sendMessage");
 
 const settings = definePluginSettings({
     actionDelay: {
         type: OptionType.NUMBER,
-        description: "Average milliseconds to wait between actions, like clicking a bot button and setting the status. Each wait varies a little so it feels natural.",
+        description: "Milliseconds to wait between actions, like clicking a bot button and setting the status. Every wait scales with this and varies a little so it feels natural.",
         default: 2000,
-        isValid: (v: number) => v >= 100 && v <= 30_000 || "Pick a delay between 100 and 30000 milliseconds."
+        min: 100,
+        max: 10_000
     },
     presetOnManualCreate: {
         type: OptionType.BOOLEAN,
@@ -47,6 +47,7 @@ export type ModalValues = Record<string, string>;
 
 /** What a server plugin registers: how its temp voice bot works. */
 export interface TempVoiceServer {
+    /** Must equal the server plugin's name, so its settings can be opened. */
     name: string;
     guildId(): string;
     botId(): string;
@@ -57,7 +58,7 @@ export interface TempVoiceServer {
     isCreatedNotice(message: Message, userId: string): boolean;
     /** Applies everything a preset sets, after the bot moved you into your new channel. */
     applyPreset(api: TempVoiceApi, channelId: string, preset: Preset): Promise<void>;
-    /** Runs when you join a channel that you didn't just create and that has other people in it. */
+    /** Runs when you join a channel that isn't your own new one and that has other people in it. */
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
 }
 
@@ -75,7 +76,8 @@ export interface TempVoiceApi {
     waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], timeout: number): Promise<T | null>;
     waitForPanel(): Promise<Message | null>;
     clickButton<T>(panel: Message, customId: string, parse?: (components: Component[] | undefined) => T | null): Promise<T | null>;
-    submitModal(panel: Message, button: string, modalId: string, values: ModalValues, applied: () => boolean, what: string): Promise<void>;
+    /** Resolves true once the bot applied the form, false after telling you it didn't. */
+    submitModal(panel: Message, button: string, modalId: string, values: ModalValues, applied: () => boolean, what: string): Promise<boolean>;
     setStatus(status: string): Promise<void>;
 }
 
@@ -90,6 +92,8 @@ export function unregisterServer(name: string) {
 }
 
 const serverFor = (guildId: string | undefined) => [...servers.values()].find(s => s.guildId() === guildId);
+const presetsOf = (server: TempVoiceServer) => server.presets().map(withDefaults);
+const openSettings = (server: TempVoiceServer) => openPluginModal(plugins[server.name]);
 
 interface RawMessage {
     author?: { id: string; };
@@ -105,35 +109,57 @@ interface ModalCreate {
     components: Component[];
 }
 
+// Text fields, their wrappers and plain text. Anything else (selects, uploads) we can't fill.
+const FILLABLE_TYPES = new Set([1, 4, 10, 18]);
+
+function canFill(list: Component[]): boolean {
+    return list.every(c => FILLABLE_TYPES.has(c.type) && canFill(c.components ?? []) && (!c.component || canFill([c.component])));
+}
+
 // Fills text fields by their custom id and keeps the bot's prefilled value for any field not given.
 function fillModal(list: Component[], values: ModalValues): unknown[] {
     return list.map(c => {
         if (c.type === 1) return { type: 1, components: fillModal(c.components ?? [], values) };
         if (c.type === 18 && c.component) return { type: 18, component: fillModal([c.component], values)[0] };
-        if (c.type === 4) return { type: 4, custom_id: c.customId, value: values[c.customId ?? ""] ?? c.value ?? "" };
+        const customId = c.customId ?? c.custom_id ?? "";
+        if (c.type === 4) return { type: 4, custom_id: customId, value: values[customId] ?? c.value ?? "" };
         return { type: c.type };
     });
 }
+
+type SubmitResult = "sent" | "failed" | "unsupported";
 
 interface PendingModal {
     channelId: string;
     modalId: string;
     values: ModalValues;
-    /** Resolves true once the filled form was sent, false if sending failed. */
-    submitted(ok: boolean): void;
+    resolve(result: SubmitResult): void;
+}
+
+interface CreateRequest {
+    server: TempVoiceServer;
+    preset: Preset;
+    timer: ReturnType<typeof setTimeout>;
 }
 
 let pendingModal: PendingModal | null = null;
-let creating = false;
+/** A channel you asked to create from a menu, until the bot moves you. */
+let request: CreateRequest | null = null;
+/** Your new channel while its preset is applied; joins there aren't treated as joining someone else. */
+let settingUp: string | null = null;
 let lastVoiceChannel: string | null = null;
+const ownerLookups = new Set<string>();
 
 const myVoiceChannel = () => SelectedChannelStore.getVoiceChannelId() ?? null;
 const fail = (text: string) => showToast({ text, variant: "critical" });
 
+/** A voice channel in a category that has a create channel, on a registered server. */
 function managedServer(id: string | null) {
     const channel = id ? ChannelStore.getChannel(id) : undefined;
-    if (!channel?.isGuildVoice() || isCreatorName(channel.name)) return null;
-    return serverFor(channel.guild_id) ?? null;
+    if (!channel?.isGuildVoice() || isCreatorChannel(channel)) return null;
+    const server = serverFor(channel.guild_id);
+    if (!server || !getCreators(channel.guild_id).some(c => c.parent_id === channel.parent_id)) return null;
+    return server;
 }
 
 function findBotMessage(server: TempVoiceServer, channelId: string, match: (m: Message) => boolean) {
@@ -156,10 +182,6 @@ function waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], tim
         const timer = setTimeout(() => done(null), timeout);
         events.forEach(e => FluxDispatcher.subscribe(e, listener));
     });
-}
-
-function timeout<T>(promise: Promise<T>, ms: number, fallback: T) {
-    return Promise.race([promise, sleep(ms).then(() => fallback)]);
 }
 
 /** Thrown inside a flow to stop it quietly. */
@@ -186,7 +208,9 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
                 ChannelRouter.transitionToChannel(channelId);
         },
 
-        scrollToBottom: () => ComponentDispatch.dispatch("SCROLLTO_PRESENT"),
+        scrollToBottom() {
+            if (SelectedChannelStore.getChannelId() === channelId) ComponentDispatch.dispatch("SCROLLTO_PRESENT");
+        },
 
         async waitFor(check, events, ms) {
             const value = await waitFor(check, events, ms);
@@ -204,15 +228,14 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
         clickButton<T>(panel: Message, customId: string, parse?: (components: Component[] | undefined) => T | null) {
             const button = findComponent(panel.components, customId);
             const channel = ChannelStore.getChannel(panel.channel_id);
-            if (!button || !channel) {
-                serverLogger.warn(`Button ${customId} not found`);
+            if (!button || button.disabled || !channel) {
+                serverLogger.warn(`Button ${customId} not found or disabled`);
                 return Promise.resolve(null);
             }
 
-            const reply = new Promise<T | null>(resolve => {
-                if (!parse) return resolve(null);
+            return new Promise<T | null>(resolve => {
                 const listener = ({ message }: { message: RawMessage; }) => {
-                    if (message.author?.id !== server.botId() || message.interaction_metadata?.interacted_message_id !== panel.id) return;
+                    if (!parse || message.author?.id !== server.botId() || message.interaction_metadata?.interacted_message_id !== panel.id) return;
                     const parsed = parse(message.components);
                     if (parsed) done(parsed);
                 };
@@ -221,41 +244,57 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
                     FluxDispatcher.unsubscribe("MESSAGE_CREATE", listener);
                     resolve(value);
                 };
-                const timer = setTimeout(() => done(null), 15_000);
-                FluxDispatcher.subscribe("MESSAGE_CREATE", listener);
-            });
+                const timer = setTimeout(() => done(null), parse ? 15_000 : 0);
+                if (parse) FluxDispatcher.subscribe("MESSAGE_CREATE", listener);
 
-            executeComponent({
-                componentType: button.type,
-                messageId: panel.id,
-                messageFlags: panel.flags,
-                customId,
-                componentId: button.id,
-                applicationId: panel.applicationId ?? panel.author.id,
-                channelId: channel.id,
-                guildId: channel.guild_id
-            }).catch(err => serverLogger.error(`Clicking ${customId} failed`, err));
-            return reply;
+                executeComponent({
+                    componentType: button.type,
+                    messageId: panel.id,
+                    messageFlags: panel.flags,
+                    customId,
+                    componentId: button.id,
+                    applicationId: panel.applicationId ?? panel.author.id,
+                    channelId: channel.id,
+                    guildId: channel.guild_id
+                }).catch(err => {
+                    serverLogger.error(`Clicking ${customId} failed`, err);
+                    done(null);
+                });
+            });
         },
 
         // Clicks a panel button that opens a bot form, fills it in the background, then waits until applied() holds.
         async submitModal(panel, button, modalId, values, applied, what) {
-            if (!findComponent(panel.components, button)) return fail(`${what} isn't available, the bot's panel has no button for it.`);
+            if (!findComponent(panel.components, button)) {
+                fail(`${what} isn't available, the bot's panel has no button for it.`);
+                return false;
+            }
 
-            const submitted = new Promise<boolean>(resolve => {
-                pendingModal = { channelId, modalId, values, submitted: resolve };
+            let mine: PendingModal | null = null;
+            const submitted = new Promise<SubmitResult | "timeout">(resolve => {
+                mine = pendingModal = { channelId, modalId, values, resolve };
+                setTimeout(() => resolve("timeout"), 15_000);
             });
-            api.clickButton(panel, button, components => getText(components) || null)
-                .then(reply => serverLogger.info(`${what}: bot replied`, reply ?? "nothing"));
+            try {
+                api.clickButton(panel, button);
+                const result = await submitted;
+                ensureAlive();
+                if (result !== "sent") {
+                    fail({
+                        timeout: `${what} didn't go through. The bot never opened its form.`,
+                        failed: `${what} didn't go through. Sending the form to the bot failed.`,
+                        unsupported: `${what} needs a choice this plugin can't fill in, so the bot's form is shown instead.`
+                    }[result]);
+                    return false;
+                }
+            } finally {
+                if (pendingModal === mine) pendingModal = null;
+            }
 
-            const sent = await timeout(submitted, 15_000, false);
-            pendingModal = null;
-            ensureAlive();
-            if (!sent) return fail(`${what} didn't go through. The bot never opened its form.`);
-
-            if (await api.waitFor(() => applied() || null, ["CHANNEL_UPDATES"], 15_000)) return;
+            if (await api.waitFor(() => applied() || null, ["CHANNEL_UPDATES"], 15_000)) return true;
             fail(`${what} didn't go through. The bot got the form but didn't apply it.`);
             serverLogger.warn(`${what} failed`, values);
+            return false;
         },
 
         async setStatus(status) {
@@ -277,58 +316,58 @@ async function runFlow(server: TempVoiceServer, channelId: string, flow: (api: T
         if (err instanceof FlowCancelled) return;
         logger.error(`${server.name} failed`, err);
         fail("Something went wrong while handling the voice channel. Check the console for details.");
-    } finally {
-        pendingModal = null;
     }
 }
 
-async function createChannel(server: TempVoiceServer, preset: Preset) {
-    if (creating) return fail("Already creating a channel.");
-    if (!ChannelStore.getChannel(preset.creatorId)) return fail(`The create channel for ${preset.name || "this preset"} doesn't exist anymore.`);
-    creating = true;
-    try {
-        const before = myVoiceChannel();
-        ChannelActions.selectVoiceChannel(preset.creatorId);
-        const channelId = await waitFor(() => {
-            const id = myVoiceChannel();
-            return id !== before && managedServer(id) === server ? id : null;
-        }, ["VOICE_STATE_UPDATES", "VOICE_CHANNEL_SELECT"], 20_000);
-        if (!channelId) return fail("The bot didn't move you to a new channel.");
-        lastVoiceChannel = channelId;
-        await runFlow(server, channelId, api => server.applyPreset(api, channelId, preset));
-    } finally {
-        creating = false;
-    }
+/** Joins the preset's create channel. The rest happens once the bot has moved you, in onCreated. */
+function createChannel(server: TempVoiceServer, preset: Preset) {
+    if (request) return fail("Already creating a channel.");
+    if (!ChannelStore.getChannel(preset.creatorId)) return fail(`The create channel for ${presetTitle(preset)} doesn't exist anymore.`);
+    if (myVoiceChannel() === preset.creatorId) return fail("You're already in that create channel. Leave it and try again.");
+
+    const timer = setTimeout(() => {
+        if (request?.timer !== timer) return;
+        request = null;
+        fail("The bot didn't move you to a new channel.");
+    }, 20_000);
+    request = { server, preset, timer };
+    ChannelActions.selectVoiceChannel(preset.creatorId);
 }
 
-// You joined a create channel yourself and the bot moved you into a new one.
-async function onManualCreate(server: TempVoiceServer, creatorId: string, channelId: string) {
-    const preset = server.presets().map(withDefaults).find(p => p.creatorId === creatorId);
-    if (!settings.store.presetOnManualCreate || !preset) return;
-
-    creating = true;
-    try {
-        await runFlow(server, channelId, async api => {
-            const me = UserStore.getCurrentUser().id;
-            const find = () => findBotMessage(server, channelId, m => server.isCreatedNotice(m, me));
-            if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-            if (await api.waitFor(find, ["MESSAGE_CREATE", "LOAD_MESSAGES_SUCCESS"], 20_000))
-                await server.applyPreset(api, channelId, preset);
-        });
-    } finally {
-        creating = false;
-    }
+function clearRequest() {
+    if (request) clearTimeout(request.timer);
+    request = null;
 }
 
-function onJoin(server: TempVoiceServer, channelId: string) {
-    const { onJoinOthers } = server;
-    if (!onJoinOthers) return;
+// You went from a create channel straight into a new channel: either your own new one, or you moved on yourself.
+function onCreated(server: TempVoiceServer, creatorId: string, channelId: string) {
+    const requested = request?.server === server && request.preset.creatorId === creatorId ? request.preset : null;
+    if (requested) clearRequest();
+    const preset = requested ?? (settings.store.presetOnManualCreate ? presetsOf(server).find(p => p.creatorId === creatorId) : undefined);
+
+    settingUp = channelId;
     return runFlow(server, channelId, async api => {
-        await api.pause(2000, 3000);
+        // Only the bot's "you created this channel" message proves it's yours and not one you clicked into.
         const me = UserStore.getCurrentUser().id;
-        const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
-        if (others.length) await onJoinOthers.call(server, api, channelId, others);
+        const find = () => findBotMessage(server, channelId, m => server.isCreatedNotice(m, me));
+        if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
+        if (await api.waitFor(find, ["MESSAGE_CREATE", "LOAD_MESSAGES_SUCCESS"], 20_000)) {
+            if (preset) await server.applyPreset(api, channelId, preset);
+            return;
+        }
+        if (requested) fail("This isn't the channel the bot made for you, so the preset wasn't applied.");
+        await joinFlow(server, api, channelId, false);
+    }).finally(() => {
+        if (settingUp === channelId) settingUp = null;
     });
+}
+
+async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: string, wait: boolean) {
+    if (!server.onJoinOthers) return;
+    if (wait) await api.pause(2000, 3000);
+    const me = UserStore.getCurrentUser().id;
+    const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
+    if (others.length) await server.onJoinOthers(api, channelId, others);
 }
 
 // Status and create channel on their own lines. The create channel is left out when it's already the title or the menu belongs to it.
@@ -341,21 +380,26 @@ function presetSubtext(preset: Preset, withCreator: boolean) {
     </>;
 }
 
-function CreateMenu(server: TempVoiceServer, presets: Preset[], withCategory: boolean) {
-    const menuId = `vc-tempvoice-${server.name.toLowerCase()}`;
+/** The menu rows for a server's presets, shared by the right-click menus and the toolbox. */
+function presetItems(server: TempVoiceServer, presets: Preset[], idPrefix: string, withCreator: boolean) {
+    if (!presets.length)
+        return [<Menu.MenuItem key="none" id={`${idPrefix}-none`} label="No presets yet, click to add some" action={() => openSettings(server)} />];
+    return presets.map(preset => (
+        <Menu.MenuItem
+            key={preset.id}
+            id={`${idPrefix}-${preset.id}`}
+            label={presetTitle(preset)}
+            subtext={presetSubtext(preset, withCreator)}
+            action={() => createChannel(server, preset)}
+        />
+    ));
+}
+
+function createMenu(server: TempVoiceServer, presets: Preset[], withCreator: boolean) {
+    const idPrefix = `vc-tempvoice-${server.name}-create`;
     return (
-        <Menu.MenuItem id={`${menuId}-create`} label="Create channel">
-            {presets.length
-                ? presets.map(preset => (
-                    <Menu.MenuItem
-                        key={preset.id}
-                        id={`${menuId}-create-${preset.id}`}
-                        label={preset.name || creatorLabel(preset.creatorId)}
-                        subtext={presetSubtext(preset, withCategory)}
-                        action={() => createChannel(server, preset)}
-                    />
-                ))
-                : <Menu.MenuItem id={`${menuId}-none`} label="No presets here yet, add some in the plugin settings" disabled />}
+        <Menu.MenuItem id={idPrefix} label="Create channel">
+            {presetItems(server, presets, idPrefix, withCreator)}
         </Menu.MenuItem>
     );
 }
@@ -363,15 +407,39 @@ function CreateMenu(server: TempVoiceServer, presets: Preset[], withCategory: bo
 const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { channel?: Channel; }) => {
     const server = serverFor(channel?.guild_id);
     if (!channel || !server) return;
-    const presets = server.presets().map(withDefaults)
-        .filter(p => p.creatorId === channel.id || ChannelStore.getChannel(p.creatorId)?.parent_id === channel.id);
-    if (isCreatorName(channel.name) || presets.length) children.push(<Menu.MenuSeparator />, CreateMenu(server, presets, false));
+    const presets = presetsOf(server).filter(p => p.creatorId === channel.id || ChannelStore.getChannel(p.creatorId)?.parent_id === channel.id);
+    if (isCreatorChannel(channel) || presets.length) children.push(<Menu.MenuSeparator />, createMenu(server, presets, false));
 };
 
 const guildMenu: NavContextMenuPatchCallback = (children, { guild }: { guild?: Guild; }) => {
     const server = serverFor(guild?.id);
-    if (server) children.push(<Menu.MenuSeparator />, CreateMenu(server, server.presets().map(withDefaults), true));
+    if (server) children.push(<Menu.MenuSeparator />, createMenu(server, presetsOf(server), true));
 };
+
+function serverHeading(server: TempVoiceServer) {
+    const guild = GuildStore.getGuild(server.guildId());
+    const owner = guild ? UserStore.getUser(guild.ownerId) : undefined;
+    // Not cached yet: look it up once so the owner shows from the next time the menu opens.
+    if (guild && !owner && !ownerLookups.has(guild.ownerId)) {
+        ownerLookups.add(guild.ownerId);
+        UserUtils.getUser(guild.ownerId).catch(() => logger.debug(`Owner of ${guild.name} not found`));
+    }
+    const iconUrl = guild?.icon ? IconUtils.getGuildIconURL({ id: guild.id, icon: guild.icon, size: 32 }) : undefined;
+
+    return (
+        <Menu.MenuItem
+            key={`${server.name}-heading`}
+            id={`vc-tempvoice-toolbox-${server.name}`}
+            label={<>
+                <b>{guild?.name ?? server.name}</b>
+                {owner && ` by @${owner.username}`}
+            </>}
+            leadingAccessory={iconUrl ? { type: "image", src: iconUrl } : undefined}
+            icon={PencilIcon}
+            action={() => openSettings(server)}
+        />
+    );
+}
 
 export default definePlugin({
     name: "TempVoiceChannels",
@@ -391,50 +459,30 @@ export default definePlugin({
 
     // One section per server: its icon and name as a heading that opens its settings, then its presets to create a channel from anywhere.
     toolboxActions() {
-        return [...servers.values()].flatMap((server, index) => {
-            const guild = GuildStore.getGuild(server.guildId());
-            const owner = guild ? UserStore.getUser(guild.ownerId) : undefined;
-            // Not cached yet: load it so the owner shows from the next time the menu opens.
-            if (guild && !owner) UserUtils.getUser(guild.ownerId).catch(() => logger.debug(`Owner of ${guild.name} not found`));
-            const iconUrl = guild?.icon ? IconUtils.getGuildIconURL({ id: guild.id, icon: guild.icon, size: 32 }) : undefined;
-            const presets = server.presets().map(withDefaults);
-            return [
-                index > 0 && <Menu.MenuSeparator key={`${server.name}-separator`} />,
-                <Menu.MenuItem
-                    key={`${server.name}-heading`}
-                    id={`vc-tempvoice-toolbox-${server.name}`}
-                    label={<>
-                        <b>{guild?.name ?? server.name}</b>
-                        {owner && ` by @${owner.username}`}
-                    </>}
-                    leadingAccessory={iconUrl ? { type: "image", src: iconUrl } : undefined}
-                    icon={PencilIcon}
-                    action={() => openPluginModal(plugins[server.name])}
-                />,
-                ...presets.length
-                    ? presets.map(preset => (
-                        <Menu.MenuItem
-                            key={preset.id}
-                            id={`vc-tempvoice-toolbox-${preset.id}`}
-                            label={preset.name || creatorLabel(preset.creatorId)}
-                            subtext={presetSubtext(preset, true)}
-                            action={() => createChannel(server, preset)}
-                        />
-                    ))
-                    : [<Menu.MenuItem key={`${server.name}-none`} id={`vc-tempvoice-toolbox-none-${server.name}`} label="No presets yet" disabled />]
-            ].filter(Boolean);
-        });
+        return [...servers.values()].flatMap((server, index) => [
+            ...index > 0 ? [<Menu.MenuSeparator key={`${server.name}-separator`} />] : [],
+            serverHeading(server),
+            ...presetItems(server, presetsOf(server), `vc-tempvoice-toolbox-${server.name}`, true)
+        ]);
     },
 
     start() {
-        // Without this, being in voice during a reload would look like a fresh join.
+        // Without this, being in voice when the plugin starts would look like a fresh join.
         lastVoiceChannel = myVoiceChannel();
+    },
+
+    stop() {
+        clearRequest();
     },
 
     // Fills a bot form the plugin asked for in the background instead of showing it.
     interceptModal(e: ModalCreate) {
         const pending = pendingModal;
         if (!pending || e.channelId !== pending.channelId || e.customId !== pending.modalId) return false;
+        if (!canFill(e.components)) {
+            pending.resolve("unsupported");
+            return false;
+        }
         RestAPI.post({
             url: Constants.Endpoints.INTERACTIONS,
             body: {
@@ -447,10 +495,10 @@ export default definePlugin({
                 nonce: SnowflakeUtils.fromTimestamp(Date.now())
             }
         }).then(
-            () => pending.submitted(true),
+            () => pending.resolve("sent"),
             err => {
                 logger.error("Form submit failed", err);
-                pending.submitted(false);
+                pending.resolve("failed");
             }
         );
         return true;
@@ -469,11 +517,11 @@ export default definePlugin({
             if (current === previous) return;
             lastVoiceChannel = current;
             const server = managedServer(current);
-            if (creating || !server || !current) return;
+            if (!server || !current || current === settingUp) return;
             const previousChannel = previous ? ChannelStore.getChannel(previous) : undefined;
-            if (previous && previousChannel?.guild_id === server.guildId() && isCreatorName(previousChannel.name))
-                return onManualCreate(server, previous, current);
-            return onJoin(server, current);
+            if (previous && previousChannel?.guild_id === server.guildId() && isCreatorChannel(previousChannel))
+                return onCreated(server, previous, current);
+            return runFlow(server, current, api => joinFlow(server, api, current, true));
         }
     }
 });
