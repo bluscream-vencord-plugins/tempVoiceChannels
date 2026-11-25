@@ -7,13 +7,14 @@
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import { plugins } from "@api/PluginManager";
 import { definePluginSettings } from "@api/Settings";
+import { PencilIcon } from "@components/Icons";
 import { openPluginModal } from "@components/settings/tabs/plugins/PluginModal";
 import { Logger } from "@utils/Logger";
 import { sleep } from "@utils/misc";
 import definePlugin, { OptionType } from "@utils/types";
 import type { Channel, FluxEvents, Guild, Message } from "@vencord/discord-types";
 import { findByCodeLazy, findByPropsLazy } from "@webpack";
-import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, VoiceStateStore } from "@webpack/common";
+import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
 import { creatorLabel, isCreatorName, Preset, withDefaults } from "./presets";
@@ -378,30 +379,35 @@ export default definePlugin({
         }
     ],
 
-    // One entry per server: hover for its presets to create a channel from anywhere, click to edit them.
+    // One section per server: its icon and name as a heading that opens its settings, then its presets to create a channel from anywhere.
     toolboxActions() {
-        return [...servers.values()].map(server => {
+        return [...servers.values()].flatMap((server, index) => {
+            const guild = GuildStore.getGuild(server.guildId());
+            const iconUrl = guild?.icon ? IconUtils.getGuildIconURL({ id: guild.id, icon: guild.icon, size: 32 }) : undefined;
             const presets = server.presets().map(withDefaults);
-            return (
+            return [
+                index > 0 && <Menu.MenuSeparator key={`${server.name}-separator`} />,
                 <Menu.MenuItem
-                    key={server.name}
+                    key={`${server.name}-heading`}
                     id={`vc-tempvoice-toolbox-${server.name}`}
-                    label={GuildStore.getGuild(server.guildId())?.name ?? server.name}
+                    label={<b>{guild?.name ?? server.name}</b>}
+                    subtext="Click to edit presets"
+                    leadingAccessory={iconUrl ? { type: "image", src: iconUrl } : undefined}
+                    icon={PencilIcon}
                     action={() => openPluginModal(plugins[server.name])}
-                >
-                    {presets.length
-                        ? presets.map(preset => (
-                            <Menu.MenuItem
-                                key={preset.id}
-                                id={`vc-tempvoice-toolbox-${preset.id}`}
-                                label={preset.name || creatorLabel(preset.creatorId)}
-                                subtext={preset.name ? creatorLabel(preset.creatorId) : preset.status || undefined}
-                                action={() => createChannel(server, preset)}
-                            />
-                        ))
-                        : <Menu.MenuItem id={`vc-tempvoice-toolbox-none-${server.name}`} label="No presets yet, click the server to add some" disabled />}
-                </Menu.MenuItem>
-            );
+                />,
+                ...presets.length
+                    ? presets.map(preset => (
+                        <Menu.MenuItem
+                            key={preset.id}
+                            id={`vc-tempvoice-toolbox-${preset.id}`}
+                            label={preset.name || creatorLabel(preset.creatorId)}
+                            subtext={[preset.status, creatorLabel(preset.creatorId)].filter(Boolean).join(" · ")}
+                            action={() => createChannel(server, preset)}
+                        />
+                    ))
+                    : [<Menu.MenuItem key={`${server.name}-none`} id={`vc-tempvoice-toolbox-none-${server.name}`} label="No presets yet" disabled />]
+            ].filter(Boolean);
         });
     },
 
