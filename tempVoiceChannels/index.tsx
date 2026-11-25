@@ -407,16 +407,10 @@ export default definePlugin({
                 <Menu.MenuItem
                     key={server.name}
                     id={`vc-tempvoice-toolbox-settings-${server.name}`}
-                    label={`Edit presets: ${guildName(server)}`}
+                    label={guildName(server)}
                     action={() => openPluginModal(plugins[server.name])}
                 />
-            )),
-            <Menu.MenuItem
-                key="shared"
-                id="vc-tempvoice-toolbox-shared"
-                label="Shared settings"
-                action={() => openPluginModal(plugins.TempVoiceChannels)}
-            />
+            ))
         ];
     },
 
