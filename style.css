@@ -1,0 +1,43 @@
+.vc-tempvoice-grid {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.5em 1em;
+    align-items: center;
+}
+
+.vc-tempvoice-header {
+    flex: 1;
+    cursor: grab;
+}
+
+.vc-tempvoice-row {
+    position: relative;
+}
+
+.vc-tempvoice-row-dragging {
+    opacity: 0.5;
+}
+
+.vc-tempvoice-drop {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--brand-500);
+    pointer-events: none;
+    z-index: 1;
+}
+
+.vc-tempvoice-drop-before {
+    top: -3px;
+}
+
+.vc-tempvoice-drop-after {
+    bottom: -3px;
+}
+
+.vc-tempvoice-delete {
+    width: 100%;
+    margin-top: 0.75em;
+}
