@@ -37,8 +37,8 @@ export function findIds(text: string, kind: IdKind) {
             const id = match.groups?.id?.trim();
             if (!id || id.length < (kind.minLength ?? 0) || id.length > (kind.maxLength ?? Infinity)) continue;
             const key = id.toLowerCase();
-            // "Foo Bar#1234567" was already found with its full name, don't add "Bar#1234567" as well.
-            if ([...found.keys()].some(known => known !== key && known.endsWith(key))) continue;
+            // Part of an ID found earlier ("Bar#1234567" in "Foo Bar#1234567", or a label pattern's "Foo" of "Foo#1234567"), skip it.
+            if ([...found.keys()].some(known => known !== key && known.includes(key))) continue;
             found.set(key, id);
         }
     }
