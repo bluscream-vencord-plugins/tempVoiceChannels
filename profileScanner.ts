@@ -74,7 +74,7 @@ const scanned = new Set<string>();
  * in the channel's chat as a message only you can see. Profiles are loaded one after another with a short
  * pause, to stay clear of Discord's rate limits.
  */
-export async function scanProfiles(channelId: string, guildId: string, userIds: string[], kinds: IdKind[]) {
+export async function scanProfiles(channelId: string, guildId: string, userIds: string[], kinds: IdKind[], onFound: () => void) {
     if (!kinds.length) return;
     for (const userId of userIds) {
         const key = `${channelId}:${userId}`;
@@ -88,7 +88,10 @@ export async function scanProfiles(channelId: string, guildId: string, userIds: 
             if (!ids.length) return [];
             return [`${kind.label}${ids.length > 1 ? "s" : ""} of <@${userId}> from their profile: ${ids.map(id => `\`${id}\``).join(", ")}`];
         });
-        if (lines.length) sendBotMessage(channelId, { content: lines.join("\n") });
+        if (lines.length) {
+            sendBotMessage(channelId, { content: lines.join("\n") });
+            onFound();
+        }
         await sleep(500 + Math.random() * 500);
     }
 }

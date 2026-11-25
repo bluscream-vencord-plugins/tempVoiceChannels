@@ -388,8 +388,10 @@ async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: s
 
 function scanFor(server: TempVoiceServer, channelId: string, userIds: string[]) {
     if (settings.store.scanProfiles && server.profileIds?.length)
-        scanProfiles(channelId, server.guildId(), userIds, server.profileIds)
-            .catch(err => logger.error("Scanning profiles failed", err));
+        // The IDs are posted in the channel's chat, so open it if you're still there, or you'd never see them.
+        scanProfiles(channelId, server.guildId(), userIds, server.profileIds, () => {
+            if (myVoiceChannel() === channelId) makeApi(server, channelId).openChat();
+        }).catch(err => logger.error("Scanning profiles failed", err));
 }
 
 interface VoiceStateChange {
