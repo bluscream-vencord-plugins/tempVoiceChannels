@@ -17,16 +17,17 @@ export const PATTERNS = {
     idKinds: {
         /**
          * "DisplayName#1234567": a 2 to 16 character display name (Unicode letters allowed), "#", then a number,
-         * usually 7 digits. 4 digit numbers are left out, those are almost always old Discord tags.
+         * usually 7 digits but shorter on old accounts ("f a t a l i t y#386").
          */
         activision: {
             label: "Activision ID",
-            // The patterns limit the name to 2 to 16 characters and the number to 5 to 9 digits.
+            // The patterns limit the name to 2 to 16 characters and the number to 3 to 9 digits where the ID clearly
+            // stands on its own. In running text it takes 5 to 9, since "Name#1234" there is more likely an old Discord tag.
             patterns: [
                 /** After a separator like "Activision: ", where the name may contain spaces ("bist gut genuuug#3506506"). */
-                /[:|=>`"'„“\-–][^\S\n]*(?<id>[\p{L}\p{N}][\p{L}\p{N} _.\-]{0,14}[\p{L}\p{N}_.\-]#\d{5,9})(?!\d)/gu,
-                /** An ID alone on its line, where the name may contain spaces too. */
-                /^[^\S\n]*(?<id>[\p{L}\p{N}][\p{L}\p{N} _.\-]{0,14}[\p{L}\p{N}_.\-]#\d{5,9})[^\S\n]*$/gmu,
+                /[:|=>`"'„“\-–][^\S\n]*(?<id>[\p{L}\p{N}][\p{L}\p{N} _.\-]{0,14}[\p{L}\p{N}_.\-]#\d{3,9})(?!\d)/gu,
+                /** An ID alone on its line, like a pronouns field holding just the ID. The name may contain spaces too. */
+                /^[^\S\n]*(?<id>[\p{L}\p{N}][\p{L}\p{N} _.\-]{0,14}[\p{L}\p{N}_.\-]#\d{3,9})[^\S\n]*$/gmu,
                 /** Anywhere else, without spaces in the name. */
                 /(?<![\p{L}\p{N}_.\-#])(?<id>[\p{L}\p{N}][\p{L}\p{N}_.\-]{1,15}#\d{5,9})(?!\d)/gu
             ]
