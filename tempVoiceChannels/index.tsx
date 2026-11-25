@@ -402,7 +402,10 @@ export default definePlugin({
                             key={preset.id}
                             id={`vc-tempvoice-toolbox-${preset.id}`}
                             label={preset.name || creatorLabel(preset.creatorId)}
-                            subtext={[preset.status, creatorLabel(preset.creatorId)].filter(Boolean).join(" · ")}
+                            subtext={<>
+                                {preset.status && <div>{preset.status}</div>}
+                                {preset.name && <div>{creatorLabel(preset.creatorId)}</div>}
+                            </>}
                             action={() => createChannel(server, preset)}
                         />
                     ))
