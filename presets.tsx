@@ -16,14 +16,17 @@ import { Span } from "@components/Span";
 import { classNameFactory } from "@utils/css";
 import { OptionType } from "@utils/types";
 import type { Channel } from "@vencord/discord-types";
-import { ChannelStore, GuildChannelStore, React, Select, TextInput, useState } from "@webpack/common";
+import { ChannelStore, GuildChannelStore, React, Select, TextInput, useCallback, useRef, useState } from "@webpack/common";
 
 
 const cl = classNameFactory("vc-tempvoice-");
 
+/** Both bots mark their create channels with a ➕ in the name. */
+export const isCreatorName = (name: string) => name.includes("➕");
+
 export function getCreators(guildId: string): Channel[] {
     const { VOCAL = [] } = GuildChannelStore.getChannels(guildId);
-    return VOCAL.map(({ channel }) => channel).filter(c => c.name.includes("➕"));
+    return VOCAL.map(({ channel }) => channel).filter(c => isCreatorName(c.name));
 }
 
 export function creatorLabel(creatorId: string) {
@@ -74,6 +77,65 @@ interface EditorOptions {
     description: string;
     usePresets(): Preset[];
     savePresets(presets: Preset[]): void;
+}
+
+interface PresetFormProps {
+    preset: Preset;
+    creators: { label: string; value: string; }[];
+    fields: PresetFields;
+    onUpdate(patch: Partial<Preset>): void;
+    onDelete(): void;
+}
+
+function PresetForm({ preset, creators, fields, onUpdate, onDelete }: PresetFormProps) {
+    return (
+        <>
+            <div className={cl("grid")}>
+                <Span weight="medium" size="md">Create channel</Span>
+                <Select
+                    options={creators}
+                    placeholder="Pick a create channel"
+                    isSelected={v => v === preset.creatorId}
+                    select={v => onUpdate({ creatorId: v })}
+                    serialize={v => v}
+                />
+                {fields.name && <>
+                    <Span weight="medium" size="md">Name</Span>
+                    <Input value={preset.name} placeholder="Rebirth Casual" onCommit={name => onUpdate({ name })} />
+                </>}
+                <Span weight="medium" size="md">Status</Span>
+                <Input value={preset.status} placeholder="Leave empty for no status" onCommit={status => onUpdate({ status })} />
+                {fields.limit && <>
+                    <Span weight="medium" size="md">User limit</Span>
+                    <Input
+                        value={preset.limit ? String(preset.limit) : ""}
+                        placeholder="Leave empty for the bot's default"
+                        onCommit={v => onUpdate({ limit: Math.max(0, Math.min(99, parseInt(v) || 0)) })}
+                    />
+                </>}
+                {fields.privacy && <>
+                    <Span weight="medium" size="md">Visibility</Span>
+                    <Select
+                        options={PRIVACY_OPTIONS}
+                        isSelected={v => v === preset.privacy}
+                        select={(v: Privacy) => onUpdate({ privacy: v })}
+                        serialize={v => v}
+                    />
+                </>}
+            </div>
+            <Button className={cl("delete")} variant="dangerPrimary" onClick={onDelete}>
+                Delete Preset
+            </Button>
+        </>
+    );
+}
+
+// ExpandableSection mounts renderContent as a component, so it needs a stable identity or the form remounts and loses focus on every save.
+function PresetCard({ initialExpanded, children, ...form }: PresetFormProps & { initialExpanded: boolean; children: React.ReactNode; }) {
+    const latest = useRef(form);
+    latest.current = form;
+    const Content = useCallback(() => <PresetForm {...latest.current} />, []);
+    return <ExpandableSection initialExpanded={initialExpanded} renderContent={Content}>{children}</ExpandableSection>;
 }
 
 function summary(preset: Preset) {
@@ -136,48 +198,13 @@ function makePresetEditor({ guildId, fields, description, usePresets, savePreset
                             onDrop={onDrop}
                         >
                             {drop?.index === index && <div className={cl("drop", drop.after ? "drop-after" : "drop-before")} />}
-                            <ExpandableSection
+                            <PresetCard
                                 initialExpanded={preset.id === added}
-                                renderContent={() => (
-                                    <>
-                                        <div className={cl("grid")}>
-                                            <Span weight="medium" size="md">Create channel</Span>
-                                            <Select
-                                                options={creators}
-                                                placeholder="Pick a create channel"
-                                                isSelected={v => v === preset.creatorId}
-                                                select={v => update(index, { creatorId: v })}
-                                                serialize={v => v}
-                                            />
-                                            {fields.name && <>
-                                                <Span weight="medium" size="md">Name</Span>
-                                                <Input value={preset.name} placeholder="Rebirth Casual" onCommit={name => update(index, { name })} />
-                                            </>}
-                                            <Span weight="medium" size="md">Status</Span>
-                                            <Input value={preset.status} placeholder="Leave empty for no status" onCommit={status => update(index, { status })} />
-                                            {fields.limit && <>
-                                                <Span weight="medium" size="md">User limit</Span>
-                                                <Input
-                                                    value={preset.limit ? String(preset.limit) : ""}
-                                                    placeholder="Leave empty for the bot's default"
-                                                    onCommit={v => update(index, { limit: Math.max(0, Math.min(99, parseInt(v) || 0)) })}
-                                                />
-                                            </>}
-                                            {fields.privacy && <>
-                                                <Span weight="medium" size="md">Visibility</Span>
-                                                <Select
-                                                    options={PRIVACY_OPTIONS}
-                                                    isSelected={v => v === preset.privacy}
-                                                    select={(v: Privacy) => update(index, { privacy: v })}
-                                                    serialize={v => v}
-                                                />
-                                            </>}
-                                        </div>
-                                        <Button className={cl("delete")} variant="dangerPrimary" onClick={() => savePresets(presets.filter((_, i) => i !== index))}>
-                                            Delete Preset
-                                        </Button>
-                                    </>
-                                )}
+                                preset={preset}
+                                creators={creators}
+                                fields={fields}
+                                onUpdate={patch => update(index, patch)}
+                                onDelete={() => savePresets(presets.filter((_, i) => i !== index))}
                             >
                                 <div
                                     className={cl("header")}
@@ -188,7 +215,7 @@ function makePresetEditor({ guildId, fields, description, usePresets, savePreset
                                     <Paragraph weight="medium" size="md">{preset.name || `Preset ${index + 1}`}</Paragraph>
                                     <Paragraph size="sm">{summary(preset)}</Paragraph>
                                 </div>
-                            </ExpandableSection>
+                            </PresetCard>
                         </div>
                     ))}
                     <Button onClick={add}>Add Preset</Button>
@@ -218,7 +245,7 @@ export function serverSettings(options: ServerSettingsOptions) {
         presets: {
             type: OptionType.CUSTOM as const,
             description: "Channel presets.",
-            default: options.defaultPresets
+            default: options.defaultPresets satisfies Preset[]
         },
         guildId: {
             type: OptionType.STRING as const,
