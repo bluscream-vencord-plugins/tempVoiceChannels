@@ -80,7 +80,15 @@ const scanned = new Set<string>();
  * in the channel's chat as a message only you can see. Profiles are loaded one after another with a short
  * pause, to stay clear of Discord's rate limits.
  */
-export async function scanProfiles(channelId: string, guildId: string, userIds: string[], kinds: IdKind[], onFound: () => void) {
+export async function scanProfiles(
+    channelId: string,
+    guildId: string,
+    userIds: string[],
+    kinds: IdKind[],
+    onFound: () => void,
+    /** IDs already shown another way, e.g. by the server's bot. They're left out so the same ID isn't posted twice. */
+    knownIds: (userId: string) => string[] = () => []
+) {
     if (!kinds.length) return;
     for (const userId of userIds) {
         const key = `${channelId}:${userId}`;
@@ -89,8 +97,9 @@ export async function scanProfiles(channelId: string, guildId: string, userIds: 
 
         await loadProfiles(userId, guildId);
         const text = profileText(userId, guildId);
+        const known = new Set(knownIds(userId).map(id => id.toLowerCase()));
         const lines = kinds.flatMap(kind => {
-            const ids = findIds(text, kind);
+            const ids = findIds(text, kind).filter(id => !known.has(id.toLowerCase()));
             if (!ids.length) return [];
             return [`${kind.label}${ids.length > 1 ? "s" : ""} of <@${userId}> from their profile: ${ids.map(id => `\`${id}\``).join(", ")}`];
         });

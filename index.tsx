@@ -70,6 +70,8 @@ export interface TempVoiceServer {
      * e.g. PATTERNS.idKinds.activision. Leave out to not scan profiles on this server.
      */
     profileIds?: IdKind[];
+    /** IDs of a user that the server's bot already showed in this channel; the profile scan leaves them out. */
+    knownIds?(channelId: string, userId: string): string[];
     /** Runs when you join a channel that isn't your own new one and that has other people in it. */
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
 }
@@ -382,8 +384,9 @@ async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: s
     const me = UserStore.getCurrentUser().id;
     const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
     if (!others.length) return;
-    scanFor(server, channelId, others);
+    // The server's own join actions go first, so the profile scan can leave out IDs its bot already showed.
     if (server.onJoinOthers) await server.onJoinOthers(api, channelId, others);
+    scanFor(server, channelId, others);
 }
 
 function scanFor(server: TempVoiceServer, channelId: string, userIds: string[]) {
@@ -391,7 +394,7 @@ function scanFor(server: TempVoiceServer, channelId: string, userIds: string[]) 
         // The IDs are posted in the channel's chat, so open it if you're still there, or you'd never see them.
         scanProfiles(channelId, server.guildId(), userIds, server.profileIds, () => {
             if (myVoiceChannel() === channelId) makeApi(server, channelId).openChat();
-        }).catch(err => logger.error("Scanning profiles failed", err));
+        }, userId => server.knownIds?.(channelId, userId) ?? []).catch(err => logger.error("Scanning profiles failed", err));
 }
 
 interface VoiceStateChange {
