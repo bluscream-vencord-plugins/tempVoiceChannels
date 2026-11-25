@@ -447,7 +447,11 @@ function serverHeading(server: TempVoiceServer) {
 export default definePlugin({
     name: "TempVoiceChannels",
     description: "Shared core for temp voice channel bot plugins: channel presets, joining create channels and handling bot panels. Enabled automatically by the server plugins that need it.",
-    authors: [{ name: "Bluscream", id: 467777925790564352n }],
+    authors: [
+        { name: "Bluscream", id: 467777925790564352n },
+        { name: "Claude Opus 5.5", id: 0n },
+        { name: "Claude Fable 5.2", id: 0n }
+    ],
     settings,
 
     patches: [
