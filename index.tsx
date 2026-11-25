@@ -17,11 +17,12 @@ import { findByCodeLazy } from "@webpack";
 import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageActions, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
+import { PATTERNS } from "./patterns";
 import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
 
 const logger = new Logger("TempVoiceChannels");
 
-const executeComponent: (args: Record<string, unknown>) => Promise<void> = findByCodeLazy("unarchiveThreadIfNecessary", "MESSAGE_COMPONENT");
+const executeComponent: (args: Record<string, unknown>) => Promise<void> = findByCodeLazy(...PATTERNS.webpack.executeComponent);
 
 const settings = definePluginSettings({
     actionDelay: {
@@ -109,8 +110,10 @@ interface ModalCreate {
     components: Component[];
 }
 
+const { actionRow, textInput, textDisplay, label } = PATTERNS.componentTypes;
+
 // Text fields, their wrappers and plain text. Anything else (selects, uploads) we can't fill.
-const FILLABLE_TYPES = new Set([1, 4, 10, 18]);
+const FILLABLE_TYPES = new Set([actionRow, textInput, textDisplay, label]);
 
 function canFill(list: Component[]): boolean {
     return list.every(c => FILLABLE_TYPES.has(c.type) && canFill(c.components ?? []) && (!c.component || canFill([c.component])));
@@ -119,10 +122,10 @@ function canFill(list: Component[]): boolean {
 // Fills text fields by their custom id and keeps the bot's prefilled value for any field not given.
 function fillModal(list: Component[], values: ModalValues): unknown[] {
     return list.map(c => {
-        if (c.type === 1) return { type: 1, components: fillModal(c.components ?? [], values) };
-        if (c.type === 18 && c.component) return { type: 18, component: fillModal([c.component], values)[0] };
+        if (c.type === actionRow) return { type: actionRow, components: fillModal(c.components ?? [], values) };
+        if (c.type === label && c.component) return { type: label, component: fillModal([c.component], values)[0] };
         const customId = c.customId ?? c.custom_id ?? "";
-        if (c.type === 4) return { type: 4, custom_id: customId, value: values[customId] ?? c.value ?? "" };
+        if (c.type === textInput) return { type: textInput, custom_id: customId, value: values[customId] ?? c.value ?? "" };
         return { type: c.type };
     });
 }
@@ -449,9 +452,9 @@ export default definePlugin({
 
     patches: [
         {
-            find: '"interaction_iframe_modal"',
+            find: PATTERNS.webpack.modalManagerFind,
             replacement: {
-                match: /INTERACTION_MODAL_CREATE:(\i)=>\{/,
+                match: PATTERNS.webpack.modalCreateHandler,
                 replace: "$&if($self.interceptModal($1))return;"
             }
         }
