@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+import type { FluxEvents } from "@vencord/discord-types";
+
 /** Text and patterns the core matches against channels, bot messages and Discord's code. */
 export const PATTERNS = {
     /** Both bots mark their create channels with this in the name. */
@@ -17,6 +19,17 @@ export const PATTERNS = {
         textInput: 4,
         textDisplay: 10,
         label: 18
+    },
+
+    /** Discord events the plugins listen for or send. The flux handler key VOICE_STATE_UPDATES has to stay a literal. */
+    events: {
+        messageCreate: "MESSAGE_CREATE" satisfies FluxEvents,
+        /** A bot panel can arrive new, get edited, or come in with a batch of loaded messages. */
+        panelChanged: ["MESSAGE_CREATE", "MESSAGE_UPDATE", "LOAD_MESSAGES_SUCCESS"] satisfies FluxEvents[],
+        messageArrived: ["MESSAGE_CREATE", "LOAD_MESSAGES_SUCCESS"] satisfies FluxEvents[],
+        channelUpdated: ["CHANNEL_UPDATES"] satisfies FluxEvents[],
+        /** ComponentDispatch event that scrolls the open chat to the newest message. */
+        scrollToPresent: "SCROLLTO_PRESENT"
     },
 
     webpack: {
