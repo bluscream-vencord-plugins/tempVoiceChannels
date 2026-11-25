@@ -21,9 +21,12 @@ export interface IdKind {
      * an ID found by a later pattern is dropped when it's only the tail end of one found earlier.
      */
     patterns: RegExp[];
-    /** IDs shorter or longer than this are ignored. */
-    minLength: number;
-    maxLength: number;
+    /**
+     * Optional limits on the whole ID's length. Usually the patterns' own quantifiers are enough; use these when
+     * the total length is easier to state than the length of each part.
+     */
+    minLength?: number;
+    maxLength?: number;
 }
 
 /** Finds every ID of one kind in free text, without duplicates. */
@@ -32,7 +35,7 @@ export function findIds(text: string, kind: IdKind) {
     for (const pattern of kind.patterns) {
         for (const match of text.matchAll(pattern)) {
             const id = match.groups?.id?.trim();
-            if (!id || id.length < kind.minLength || id.length > kind.maxLength) continue;
+            if (!id || id.length < (kind.minLength ?? 0) || id.length > (kind.maxLength ?? Infinity)) continue;
             const key = id.toLowerCase();
             // "Foo Bar#1234567" was already found with its full name, don't add "Bar#1234567" as well.
             if ([...found.keys()].some(known => known !== key && known.endsWith(key))) continue;

@@ -21,8 +21,7 @@ export const PATTERNS = {
          */
         activision: {
             label: "Activision ID",
-            minLength: 2 + 1 + 5,
-            maxLength: 16 + 1 + 9,
+            // The patterns limit the name to 2 to 16 characters and the number to 5 to 9 digits.
             patterns: [
                 /** After a separator like "Activision: ", where the name may contain spaces ("bist gut genuuug#3506506"). */
                 /[:|=>`"'„“\-–][^\S\n]*(?<id>[\p{L}\p{N}][\p{L}\p{N} _.\-]{0,14}[\p{L}\p{N}_.\-]#\d{5,9})(?!\d)/gu,
