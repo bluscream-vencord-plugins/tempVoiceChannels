@@ -212,7 +212,7 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
         },
 
         scrollToBottom() {
-            if (SelectedChannelStore.getChannelId() === channelId) ComponentDispatch.dispatch("SCROLLTO_PRESENT");
+            if (SelectedChannelStore.getChannelId() === channelId) ComponentDispatch.dispatch(PATTERNS.events.scrollToPresent);
         },
 
         async waitFor(check, events, ms) {
@@ -224,7 +224,7 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
         waitForPanel() {
             const find = () => findBotMessage(server, channelId, server.isPanel);
             if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-            return api.waitFor(find, ["MESSAGE_CREATE", "MESSAGE_UPDATE", "LOAD_MESSAGES_SUCCESS"], 20_000);
+            return api.waitFor(find, PATTERNS.events.panelChanged, 20_000);
         },
 
         // Clicks a panel button and resolves with the first bot reply to that click that the parser accepts.
@@ -244,11 +244,11 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
                 };
                 const done = (value: T | null) => {
                     clearTimeout(timer);
-                    FluxDispatcher.unsubscribe("MESSAGE_CREATE", listener);
+                    FluxDispatcher.unsubscribe(PATTERNS.events.messageCreate, listener);
                     resolve(value);
                 };
                 const timer = setTimeout(() => done(null), parse ? 15_000 : 0);
-                if (parse) FluxDispatcher.subscribe("MESSAGE_CREATE", listener);
+                if (parse) FluxDispatcher.subscribe(PATTERNS.events.messageCreate, listener);
 
                 executeComponent({
                     componentType: button.type,
@@ -294,7 +294,7 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
                 if (pendingModal === mine) pendingModal = null;
             }
 
-            if (await api.waitFor(() => applied() || null, ["CHANNEL_UPDATES"], 15_000)) return true;
+            if (await api.waitFor(() => applied() || null, PATTERNS.events.channelUpdated, 15_000)) return true;
             fail(`${what} didn't go through. The bot got the form but didn't apply it.`);
             serverLogger.warn(`${what} failed`, values);
             return false;
@@ -354,7 +354,7 @@ function onCreated(server: TempVoiceServer, creatorId: string, channelId: string
         const me = UserStore.getCurrentUser().id;
         const find = () => findBotMessage(server, channelId, m => server.isCreatedNotice(m, me));
         if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-        if (await api.waitFor(find, ["MESSAGE_CREATE", "LOAD_MESSAGES_SUCCESS"], 20_000)) {
+        if (await api.waitFor(find, PATTERNS.events.messageArrived, 20_000)) {
             if (preset) await server.applyPreset(api, channelId, preset);
             return;
         }
