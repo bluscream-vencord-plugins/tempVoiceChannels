@@ -72,6 +72,18 @@ export async function lookupIds(userId: string, guildId: string, kind: IdKind) {
     return findIds(profileText(userId, guildId), kind);
 }
 
+/**
+ * The IDs of one kind in a user's profiles, from cache only, for places that can't wait like menus.
+ * Returns null and starts loading the profiles when they aren't cached yet.
+ */
+export function cachedIds(userId: string, guildId: string, kind: IdKind) {
+    if (!UserProfileStore.getUserProfile(userId) || !UserProfileStore.getGuildMemberProfile(userId, guildId)) {
+        loadProfiles(userId, guildId);
+        return null;
+    }
+    return findIds(profileText(userId, guildId), kind);
+}
+
 /** Users already scanned in a channel, so they aren't posted again until you leave it. */
 const scanned = new Set<string>();
 

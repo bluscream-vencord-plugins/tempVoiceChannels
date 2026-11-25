@@ -12,14 +12,15 @@ import { openPluginModal } from "@components/settings/tabs/plugins/PluginModal";
 import { Logger } from "@utils/Logger";
 import { sleep } from "@utils/misc";
 import definePlugin, { OptionType } from "@utils/types";
-import type { Channel, FluxEvents, Guild, Message } from "@vencord/discord-types";
+import { copyWithToast } from "@utils/discord";
+import type { Channel, FluxEvents, Guild, Message, User } from "@vencord/discord-types";
 import { findByCodeLazy } from "@webpack";
 import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageActions, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
 import { PATTERNS } from "./patterns";
 import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
-import { forgetScanned, IdKind, scanProfiles } from "./profileScanner";
+import { cachedIds, forgetScanned, IdKind, scanProfiles } from "./profileScanner";
 
 const logger = new Logger("TempVoiceChannels");
 
@@ -72,6 +73,8 @@ export interface TempVoiceServer {
     profileIds?: IdKind[];
     /** IDs of a user that the server's bot already showed in this channel; the profile scan leaves them out. */
     knownIds?(channelId: string, userId: string): string[];
+    /** IDs of a user the server plugin knows from elsewhere (e.g. its bot), for the "Copy ID" menu. */
+    otherIds?(userId: string): { id: string; source: string; }[];
     /** Runs when you join a channel that isn't your own new one and that has other people in it. */
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
 }
@@ -454,7 +457,38 @@ const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { chann
     if (isCreatorChannel(channel) || presets.length) children.push(<Menu.MenuSeparator />, createMenu(server, presets, false));
 };
 
-const guildMenu: NavContextMenuPatchCallback = (children, { guild }: { guild?: Guild; }) => {
+// Right-clicking someone who's in voice on a registered server: copy any ID known for them.
+const userMenu: NavContextMenuPatchCallback = (children, { user }: { user?: User; }) => {
+    if (!user) return;
+    const voiceChannel = VoiceStateStore.getVoiceStateForUser(user.id)?.channelId;
+    const server = serverFor(voiceChannel ? ChannelStore.getChannel(voiceChannel)?.guild_id : undefined);
+    if (!server || (!server.profileIds?.length && !server.otherIds)) return;
+
+    const found = new Map<string, { id: string; source: string; }>();
+    const add = (id: string, source: string) => {
+        if (!found.has(id.toLowerCase())) found.set(id.toLowerCase(), { id, source });
+    };
+    server.otherIds?.(user.id).forEach(({ id, source }) => add(id, source));
+    let loading = false;
+    for (const kind of server.profileIds ?? []) {
+        const ids = cachedIds(user.id, server.guildId(), kind);
+        if (ids) ids.forEach(id => add(id, `${kind.label} from their profile`));
+        else loading = true;
+    }
+
+    const idPrefix = `vc-tempvoice-copy-id-${user.id}`;
+    children.push(
+        <Menu.MenuItem id={idPrefix} label="Copy ID">
+            {[...found.values()].map(({ id, source }) => (
+                <Menu.MenuItem key={id} id={`${idPrefix}-${id}`} label={id} subtext={source} action={() => copyWithToast(id, `Copied ${id}`)} />
+            ))}
+            {loading && <Menu.MenuItem id={`${idPrefix}-loading`} label="Loading profile, open the menu again in a moment" disabled />}
+            {!found.size && !loading && <Menu.MenuItem id={`${idPrefix}-none`} label="No IDs known for this user" disabled />}
+        </Menu.MenuItem>
+    );
+};
+
+const guildMenu: NavContextMenuPatchCallback =(children, { guild }: { guild?: Guild; }) => {
     const server = serverFor(guild?.id);
     if (server) children.push(<Menu.MenuSeparator />, createMenu(server, presetsOf(server), true));
 };
