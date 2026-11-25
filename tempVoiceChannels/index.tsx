@@ -5,13 +5,15 @@
  */
 
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
+import { plugins } from "@api/PluginManager";
 import { definePluginSettings } from "@api/Settings";
+import { openPluginModal } from "@components/settings/tabs/plugins/PluginModal";
 import { Logger } from "@utils/Logger";
 import { sleep } from "@utils/misc";
 import definePlugin, { OptionType } from "@utils/types";
 import type { Channel, FluxEvents, Guild, Message } from "@vencord/discord-types";
 import { findByCodeLazy, findByPropsLazy } from "@webpack";
-import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, VoiceStateStore } from "@webpack/common";
+import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
 import { creatorLabel, isCreatorName, Preset, withDefaults } from "./presets";
@@ -375,6 +377,30 @@ export default definePlugin({
             }
         }
     ],
+
+    // One toolbox entry that links to the preset settings of every registered server plugin.
+    toolboxActions() {
+        return (
+            <Menu.MenuItem id="vc-tempvoice-templates" label="Channel Templates" action={() => openPluginModal(plugins.TempVoiceChannels)}>
+                {[...servers.values()].map(server => (
+                    <Menu.MenuItem
+                        key={server.name}
+                        id={`vc-tempvoice-templates-${server.name}`}
+                        label={GuildStore.getGuild(server.guildId())?.name ?? server.name}
+                        subtext={server.name}
+                        action={() => openPluginModal(plugins[server.name])}
+                    />
+                ))}
+                <Menu.MenuSeparator />
+                <Menu.MenuItem
+                    id="vc-tempvoice-templates-shared"
+                    label="Shared settings"
+                    subtext="Delay, opening the chat and more"
+                    action={() => openPluginModal(plugins.TempVoiceChannels)}
+                />
+            </Menu.MenuItem>
+        );
+    },
 
     start() {
         // Without this, being in voice during a reload would look like a fresh join.
