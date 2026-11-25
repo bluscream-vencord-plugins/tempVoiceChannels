@@ -66,6 +66,12 @@ function profileText(userId: string, guildId: string) {
     ].filter(Boolean).join("\n");
 }
 
+/** Looks up one kind of ID in a user's profiles, loading them first if they aren't cached. */
+export async function lookupIds(userId: string, guildId: string, kind: IdKind) {
+    await loadProfiles(userId, guildId);
+    return findIds(profileText(userId, guildId), kind);
+}
+
 /** Users already scanned in a channel, so they aren't posted again until you leave it. */
 const scanned = new Set<string>();
 
