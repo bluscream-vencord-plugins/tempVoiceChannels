@@ -15,11 +15,23 @@ import { Paragraph } from "@components/Paragraph";
 import { Span } from "@components/Span";
 import { classNameFactory } from "@utils/css";
 import { OptionType } from "@utils/types";
-import { React, Select, TextInput, useState } from "@webpack/common";
+import type { Channel } from "@vencord/discord-types";
+import { ChannelStore, GuildChannelStore, React, Select, TextInput, useState } from "@webpack/common";
 
-import { creatorLabel, getCreators } from "./core";
 
 const cl = classNameFactory("vc-tempvoice-");
+
+export function getCreators(guildId: string): Channel[] {
+    const { VOCAL = [] } = GuildChannelStore.getChannels(guildId);
+    return VOCAL.map(({ channel }) => channel).filter(c => c.name.includes("➕"));
+}
+
+export function creatorLabel(creatorId: string) {
+    const creator = ChannelStore.getChannel(creatorId);
+    if (!creator) return "Unknown channel";
+    const category = creator.parent_id ? ChannelStore.getChannel(creator.parent_id)?.name : null;
+    return category ? `${category} › ${creator.name}` : creator.name;
+}
 
 export type Privacy = "unchanged" | "private" | "public";
 
@@ -57,7 +69,7 @@ function Input({ value, placeholder, onCommit }: { value: string; placeholder: s
 interface Drop { index: number; after: boolean; }
 
 interface EditorOptions {
-    guildId: string;
+    guildId(): string;
     fields: PresetFields;
     description: string;
     usePresets(): Preset[];
@@ -79,7 +91,7 @@ function makePresetEditor({ guildId, fields, description, usePresets, savePreset
         const [dragged, setDragged] = useState<number | null>(null);
         const [drop, setDrop] = useState<Drop | null>(null);
         const [added, setAdded] = useState<string | null>(null);
-        const creators = getCreators(guildId).map(c => ({ label: creatorLabel(c.id), value: c.id }));
+        const creators = getCreators(guildId()).map(c => ({ label: creatorLabel(c.id), value: c.id }));
 
         const update = (index: number, patch: Partial<Preset>) => savePresets(presets.map((p, i) => i === index ? { ...p, ...patch } : p));
         const add = () => {
@@ -186,8 +198,18 @@ function makePresetEditor({ guildId, fields, description, usePresets, savePreset
     };
 }
 
-/** The settings every temp voice plugin shares. Spread into definePluginSettings. */
-export function tempVoiceSettings(options: EditorOptions & { defaultPresets: Preset[]; }) {
+interface ServerSettingsOptions extends Omit<EditorOptions, "guildId"> {
+    defaultGuildId: string;
+    defaultBotId: string;
+    defaultPresets: Preset[];
+    guildId(): string;
+}
+
+/**
+ * The settings every server plugin has: its presets and the hidden server and bot IDs.
+ * Spread into definePluginSettings. Delays and other shared options live in TempVoiceChannels.
+ */
+export function serverSettings(options: ServerSettingsOptions) {
     return {
         presetEditor: {
             type: OptionType.COMPONENT as const,
@@ -198,21 +220,17 @@ export function tempVoiceSettings(options: EditorOptions & { defaultPresets: Pre
             description: "Channel presets.",
             default: options.defaultPresets
         },
-        actionDelay: {
-            type: OptionType.NUMBER as const,
-            description: "Average milliseconds to wait between actions, like clicking a bot button and setting the status. Each wait varies a little so it feels natural.",
-            default: 2000,
-            isValid: (v: number) => v >= 100 && v <= 30_000 || "Pick a delay between 100 and 30000 milliseconds."
+        guildId: {
+            type: OptionType.STRING as const,
+            description: "ID of the server this plugin works on.",
+            default: options.defaultGuildId,
+            hidden: true
         },
-        presetOnManualCreate: {
-            type: OptionType.BOOLEAN as const,
-            description: "When you create a channel yourself by joining a create channel, apply the first preset for that create channel once the bot has moved you.",
-            default: true
-        },
-        openChat: {
-            type: OptionType.BOOLEAN as const,
-            description: "When the plugin creates or joins a channel for you, open its chat so you can see what it clicked and what the bot replied.",
-            default: true
+        botId: {
+            type: OptionType.STRING as const,
+            description: "ID of the server's temp voice bot.",
+            default: options.defaultBotId,
+            hidden: true
         }
     };
 }

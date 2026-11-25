@@ -9,9 +9,9 @@ import definePlugin from "@utils/types";
 import type { Message } from "@vencord/discord-types";
 import { ChannelStore, showToast } from "@webpack/common";
 
-import { createTempVoice, TempVoiceApi } from "../_tempVoice/core";
+import { registerServer, TempVoiceApi, TempVoiceServer, unregisterServer } from "../tempVoiceChannels";
 import { ActivisionEntry, isPanel, LogEntry, parseActivision, parseLogs } from "./parsers";
-import { GUILD_ID, settings } from "./settings";
+import { settings } from "./settings";
 
 export const lastLogs = new Map<string, LogEntry[]>();
 export const lastActivision = new Map<string, ActivisionEntry[]>();
@@ -22,11 +22,11 @@ async function fetchActivision(api: TempVoiceApi, panel: Message) {
     return entries;
 }
 
-const tempVoice = createTempVoice({
+const server: TempVoiceServer = {
     name: "CodWarzoneHelper",
-    guildId: GUILD_ID,
-    botId: "1515388147759059015",
-    store: () => settings.store,
+    guildId: () => settings.store.guildId,
+    botId: () => settings.store.botId,
+    presets: () => settings.store.presets,
     isPanel: m => isPanel(m.components),
     // "🎮 Kanal erstellt von: @owner"
     isCreatedNotice: (m, userId) => m.content.includes("Kanal erstellt von") && m.content.includes(`<@${userId}>`),
@@ -91,25 +91,20 @@ const tempVoice = createTempVoice({
             duration: rest.length ? 8000 : 4000
         });
     }
-});
+};
 
 export default definePlugin({
     name: "CodWarzoneHelper",
     description: "Creates preset voice channels on the German Warzone & MW4 server and handles the V3NOM voice panel for you.",
     authors: [{ name: "Bluscream", id: 467777925790564352n }],
+    dependencies: ["TempVoiceChannels"],
     settings,
 
-    patches: [
-        {
-            find: '"interaction_iframe_modal"',
-            replacement: {
-                match: /INTERACTION_MODAL_CREATE:(\i)=>\{/,
-                replace: "$&if($self.interceptModal($1))return;"
-            }
-        }
-    ],
+    start() {
+        registerServer(server);
+    },
 
-    interceptModal: tempVoice.interceptModal,
-    contextMenus: tempVoice.contextMenus,
-    flux: tempVoice.flux
+    stop() {
+        unregisterServer(server.name);
+    }
 });

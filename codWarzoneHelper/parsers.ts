@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-import { findComponent, getText } from "../_tempVoice/components";
+import { findComponent, getText } from "../tempVoiceChannels/components";
 
 export function isPanel(components: unknown[] | undefined) {
     return !!findComponent(components, "rename_button") && !!findComponent(components, "activision_button");

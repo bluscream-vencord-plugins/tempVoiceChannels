@@ -2,28 +2,31 @@
 
 Equicord user plugins for the temp voice channel bots on two German Call of Duty Discord servers.
 
-| Folder | What it is |
-| --- | --- |
-| `_tempVoice` | Shared core: preset editor, joining create channels, detecting your own channels, clicking bot buttons and filling bot forms. The leading `_` keeps Equicord from loading it as a plugin. |
-| `codWarzoneHelper` | Plugin for "⭐ Call of Duty: Warzone & MW4 \| Deutschland" and its V3NOM bot: rename, status, user limit, visibility, voice logs and Activision IDs. |
-| `warzoneDeutschlandHelper` | Plugin for "Call of Duty: Warzone Deutschland" and its Xavis bot: channel status. |
+| Folder | Plugin | What it does |
+| --- | --- | --- |
+| `tempVoiceChannels` | TempVoiceChannels | Shared core the server plugins depend on. Owns the shared settings (action delay, open chat, apply preset on manual create), the right-click "Create channel" menus, joining create channels, detecting channels you created yourself, clicking bot buttons and filling bot forms in the background. Enabled automatically by the server plugins. |
+| `codWarzoneHelper` | CodWarzoneHelper | "⭐ Call of Duty: Warzone & MW4 \| Deutschland" and its V3NOM bot: rename, status, user limit, visibility, voice logs, Activision IDs, and copying the Activision ID of people in a channel you join. |
+| `warzoneDeutschlandHelper` | WarzoneDeutschlandHelper | "Call of Duty: Warzone Deutschland" and its Xavis bot: channel status. |
+
+Each server plugin registers its bot with TempVoiceChannels when it starts. Its server and bot IDs are hidden settings, so they can be changed without editing code.
 
 ## Install
 
-All three folders must sit directly in `src/userplugins`, because the plugins import the shared core with `../_tempVoice`. Either copy them there or link them, for example on Windows:
+All three folders must sit directly in `src/userplugins`, because the server plugins import the core with `../tempVoiceChannels`. Keep this repo inside `src/userplugins` under a name starting with `.` (Equicord skips those folders) and link the plugin folders next to it, for example on Windows:
 
 ```powershell
-foreach ($d in "_tempVoice", "codWarzoneHelper", "warzoneDeutschlandHelper") {
-    New-Item -ItemType Junction -Path "src\userplugins\$d" -Target "path\to\warzoneVoiceHelpers\$d"
+cd src\userplugins
+git clone https://github.com/bluscream-vencord-plugins/warzoneVoiceHelpers .warzoneVoiceHelpers
+foreach ($d in "tempVoiceChannels", "codWarzoneHelper", "warzoneDeutschlandHelper") {
+    New-Item -ItemType Junction -Path $d -Target ".warzoneVoiceHelpers\$d"
 }
 ```
 
-Then rebuild Equicord and enable the plugin for your server.
+The checkout has to stay inside the Equicord source tree; otherwise the build can't resolve Equicord's `@utils/…` imports. Then rebuild Equicord and enable the plugin for your server.
 
 ## Features
 
 - Right-click a create channel, its category, the server icon or the server name to create a channel from a preset.
 - Joining a create channel yourself applies the first preset for it once the bot has moved you.
-- Presets are edited in the plugin settings with collapsible cards and drag and drop ordering.
+- Presets are edited in each server plugin's settings with collapsible cards and drag and drop ordering. Only the fields that server's bot supports are shown.
 - Every action waits a configurable, slightly randomised delay so the bot has time to respond.
-- CodWarzoneHelper also copies the Activision ID of the people in a channel you join to your clipboard.

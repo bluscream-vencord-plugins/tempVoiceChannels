@@ -7,15 +7,15 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
-import { tempVoiceSettings } from "../_tempVoice/presets";
-
-export const GUILD_ID = "500074231544152074";
+import { serverSettings } from "../tempVoiceChannels/presets";
 
 const PRESET_KEYS: ["presets"] = ["presets"];
 
 export const settings = definePluginSettings({
-    ...tempVoiceSettings({
-        guildId: GUILD_ID,
+    ...serverSettings({
+        defaultGuildId: "500074231544152074",
+        defaultBotId: "1515388147759059015",
+        guildId: () => settings.store.guildId,
         fields: { name: true, limit: true, privacy: true },
         description: "Each preset joins a create channel, waits for the bot to move you, then renames the new channel and sets its status, user limit and visibility.",
         usePresets: () => settings.use(PRESET_KEYS).presets,
