@@ -378,28 +378,46 @@ export default definePlugin({
         }
     ],
 
-    // One toolbox entry that links to the preset settings of every registered server plugin.
+    // Create a channel from any preset of any server, from anywhere, plus links to each plugin's settings.
     toolboxActions() {
-        return (
-            <Menu.MenuItem id="vc-tempvoice-templates" label="Channel Templates" action={() => openPluginModal(plugins.TempVoiceChannels)}>
-                {[...servers.values()].map(server => (
-                    <Menu.MenuItem
-                        key={server.name}
-                        id={`vc-tempvoice-templates-${server.name}`}
-                        label={GuildStore.getGuild(server.guildId())?.name ?? server.name}
-                        subtext={server.name}
-                        action={() => openPluginModal(plugins[server.name])}
-                    />
-                ))}
-                <Menu.MenuSeparator />
+        const registered = [...servers.values()];
+        const guildName = (server: TempVoiceServer) => GuildStore.getGuild(server.guildId())?.name ?? server.name;
+        return [
+            <Menu.MenuItem key="create" id="vc-tempvoice-toolbox-create" label="Create channel">
+                {registered.map(server => {
+                    const presets = server.presets().map(withDefaults);
+                    return (
+                        <Menu.MenuGroup key={server.name} label={guildName(server)}>
+                            {presets.length
+                                ? presets.map(preset => (
+                                    <Menu.MenuItem
+                                        key={preset.id}
+                                        id={`vc-tempvoice-toolbox-create-${preset.id}`}
+                                        label={preset.name || creatorLabel(preset.creatorId)}
+                                        subtext={preset.name ? creatorLabel(preset.creatorId) : preset.status || undefined}
+                                        action={() => createChannel(server, preset)}
+                                    />
+                                ))
+                                : <Menu.MenuItem id={`vc-tempvoice-toolbox-none-${server.name}`} label="No presets yet" disabled />}
+                        </Menu.MenuGroup>
+                    );
+                })}
+            </Menu.MenuItem>,
+            ...registered.map(server => (
                 <Menu.MenuItem
-                    id="vc-tempvoice-templates-shared"
-                    label="Shared settings"
-                    subtext="Delay, opening the chat and more"
-                    action={() => openPluginModal(plugins.TempVoiceChannels)}
+                    key={server.name}
+                    id={`vc-tempvoice-toolbox-settings-${server.name}`}
+                    label={`Edit presets: ${guildName(server)}`}
+                    action={() => openPluginModal(plugins[server.name])}
                 />
-            </Menu.MenuItem>
-        );
+            )),
+            <Menu.MenuItem
+                key="shared"
+                id="vc-tempvoice-toolbox-shared"
+                label="Shared settings"
+                action={() => openPluginModal(plugins.TempVoiceChannels)}
+            />
+        ];
     },
 
     start() {
