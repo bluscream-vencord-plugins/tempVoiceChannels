@@ -19,6 +19,7 @@ import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, Compo
 import { Component, findComponent, getText } from "./components";
 import { PATTERNS } from "./patterns";
 import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
+import { forgetScanned, IdKind, scanProfiles } from "./profileScanner";
 
 const logger = new Logger("TempVoiceChannels");
 
@@ -35,6 +36,11 @@ const settings = definePluginSettings({
     presetOnManualCreate: {
         type: OptionType.BOOLEAN,
         description: "When you create a channel yourself by joining a create channel, apply the first preset for that create channel once the bot has moved you.",
+        default: true
+    },
+    scanProfiles: {
+        type: OptionType.BOOLEAN,
+        description: "When you join a channel with people, or someone joins yours, look for IDs like Activision IDs in their server and global profiles and show them in the channel chat, only visible to you.",
         default: true
     },
     openChat: {
@@ -59,6 +65,11 @@ export interface TempVoiceServer {
     isCreatedNotice(message: Message, userId: string): boolean;
     /** Applies everything a preset sets, after the bot moved you into your new channel. */
     applyPreset(api: TempVoiceApi, channelId: string, preset: Preset): Promise<void>;
+    /**
+     * Kinds of IDs to look for in people's profiles when you join a channel with them or they join yours,
+     * e.g. PATTERNS.idKinds.activision. Leave out to not scan profiles on this server.
+     */
+    profileIds?: IdKind[];
     /** Runs when you join a channel that isn't your own new one and that has other people in it. */
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
 }
@@ -366,11 +377,35 @@ function onCreated(server: TempVoiceServer, creatorId: string, channelId: string
 }
 
 async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: string, wait: boolean) {
-    if (!server.onJoinOthers) return;
+    if (!server.onJoinOthers && !server.profileIds?.length) return;
     if (wait) await api.pause(2000, 3000);
     const me = UserStore.getCurrentUser().id;
     const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
-    if (others.length) await server.onJoinOthers(api, channelId, others);
+    if (!others.length) return;
+    scanFor(server, channelId, others);
+    if (server.onJoinOthers) await server.onJoinOthers(api, channelId, others);
+}
+
+function scanFor(server: TempVoiceServer, channelId: string, userIds: string[]) {
+    if (settings.store.scanProfiles && server.profileIds?.length)
+        scanProfiles(channelId, server.guildId(), userIds, server.profileIds)
+            .catch(err => logger.error("Scanning profiles failed", err));
+}
+
+interface VoiceStateChange {
+    userId: string;
+    channelId?: string | null;
+    oldChannelId?: string | null;
+}
+
+// Someone else joined the channel you're in.
+function onOthersJoined(voiceStates: VoiceStateChange[]) {
+    const mine = myVoiceChannel();
+    const server = managedServer(mine);
+    if (!mine || !server) return;
+    const me = UserStore.getCurrentUser().id;
+    const joined = voiceStates.filter(s => s.userId !== me && s.channelId === mine && s.oldChannelId !== mine).map(s => s.userId);
+    if (joined.length) scanFor(server, mine, joined);
 }
 
 // Status and create channel on their own lines. The create channel is left out when it's already the title or the menu belongs to it.
@@ -518,11 +553,12 @@ export default definePlugin({
     },
 
     flux: {
-        VOICE_STATE_UPDATES() {
+        VOICE_STATE_UPDATES({ voiceStates }: { voiceStates: VoiceStateChange[]; }) {
             const current = myVoiceChannel();
             const previous = lastVoiceChannel;
-            if (current === previous) return;
+            if (current === previous) return onOthersJoined(voiceStates);
             lastVoiceChannel = current;
+            if (previous) forgetScanned(previous);
             const server = managedServer(current);
             if (!server || !current || current === settingUp) return;
             const previousChannel = previous ? ChannelStore.getChannel(previous) : undefined;

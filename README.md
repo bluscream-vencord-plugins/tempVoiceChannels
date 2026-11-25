@@ -30,6 +30,7 @@ Enabling a server plugin enables TempVoiceChannels automatically. The first time
 - **Right-click menus** on create channels, their categories, the server icon and the server name to create a channel from a preset.
 - **Equicord Toolbox** section: one heading per server (icon, name and owner) that opens that plugin's settings, with all its presets below to create a channel from anywhere in Discord. Clicking TempVoiceChannels itself opens the shared settings.
 - **Manual creation:** joining a create channel yourself applies the first preset for it once the bot has moved you. Presets are only applied after the bot's own message confirms the new channel is yours.
+- **Profile IDs:** when you join a channel with people, or someone joins yours, their server and global profiles are loaded (if not cached) and scanned for IDs like Activision IDs. What it finds is posted in the channel chat as a message only you can see. Server plugins choose which kinds of IDs to look for (`profileIds`); a kind is a label, regexes with a named `id` group and a minimum and maximum length (see `PATTERNS.idKinds` and `profileScanner.ts`).
 - **Bot automation:** clicks the bot's panel buttons and fills its forms in the background instead of showing them.
 - **Natural pacing:** every action waits a configurable, slightly randomised delay so the bot has time to respond. Flows stop on their own when you leave the channel.
 
