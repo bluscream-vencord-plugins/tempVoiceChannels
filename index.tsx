@@ -24,7 +24,7 @@ import { Component, findComponent, getText } from "./components";
 import { PATTERNS } from "./patterns";
 import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
 import { clearRememberedIds, loadRememberedIds, rememberedCount, rememberedIds } from "./idStore";
-import { cachedIds, forgetScanned, IdKind, scanProfiles } from "./profileScanner";
+import { cachedIds, forgetScanned, IdKind, PROFILE_SOURCE, scanProfiles } from "./profileScanner";
 
 const logger = new Logger("TempVoiceChannels");
 
@@ -495,25 +495,32 @@ const userMenu: NavContextMenuPatchCallback = (children, { user }: { user?: User
     const remembered = rememberedIds(user.id);
     if (!remembered.length && (!server || (!server.profileIds?.length && !server.otherIds))) return;
 
-    const found = new Map<string, { id: string; source: string; }>();
-    const add = (id: string, source: string) => {
-        if (!found.has(id.toLowerCase())) found.set(id.toLowerCase(), { id, source });
+    const found = new Map<string, { id: string; source: string; lastSeen?: number; }>();
+    const add = (id: string, source: string, lastSeen?: number) => {
+        if (!found.has(id.toLowerCase())) found.set(id.toLowerCase(), { id, source, lastSeen });
     };
     // What can be seen right now comes first, then remembered IDs that are gone from everywhere.
     server?.otherIds?.(user.id).forEach(({ id, source }) => add(id, source));
     let loading = false;
-    for (const kind of server?.profileIds ?? []) {
-        const ids = cachedIds(user.id, server?.guildId() ?? "", kind);
-        if (ids) ids.forEach(id => add(id, `${kind.label} from their profile`));
+    if (server) for (const kind of server.profileIds ?? []) {
+        const ids = cachedIds(user.id, server.guildId(), kind);
+        if (ids) ids.forEach(id => add(id, PROFILE_SOURCE));
         else loading = true;
     }
-    for (const { id, source, lastSeen } of remembered) add(id, `${source}, last seen ${moment(lastSeen).fromNow()}`);
+    for (const { id, source, lastSeen } of remembered) add(id, source, lastSeen);
 
     const idPrefix = `vc-tempvoice-copy-id-${user.id}`;
     children.push(
         <Menu.MenuItem id={idPrefix} label="Copy ID">
-            {[...found.values()].map(({ id, source }) => (
-                <Menu.MenuItem key={id} id={`${idPrefix}-${id}`} label={id} subtext={source} action={() => copyWithToast(id, `Copied ${id}`)} />
+            {[...found.values()].map(({ id, source, lastSeen }) => (
+                <Menu.MenuItem
+                    key={id}
+                    id={`${idPrefix}-${id}`}
+                    label={id}
+                    // "profile, 3 days ago": only IDs that aren't visible right now carry a time.
+                    subtext={lastSeen ? `${source}, ${moment(lastSeen).fromNow()}` : source}
+                    action={() => copyWithToast(id, `Copied ${id}`)}
+                />
             ))}
             {loading && <Menu.MenuItem id={`${idPrefix}-loading`} label="Loading profile, open the menu again in a moment" disabled />}
             {!found.size && !loading && <Menu.MenuItem id={`${idPrefix}-none`} label="No IDs known for this user" disabled />}
@@ -583,6 +590,7 @@ export default definePlugin({
     start() {
         // Without this, being in voice when the plugin starts would look like a fresh join.
         lastVoiceChannel = myVoiceChannel();
+        loadRememberedIds(() => settings.store.rememberIds);
     },
 
     stop() {
@@ -621,7 +629,8 @@ export default definePlugin({
     contextMenus: {
         "channel-context": channelMenu,
         "guild-context": guildMenu,
-        "guild-header-popout": guildMenu
+        "guild-header-popout": guildMenu,
+        "user-context": userMenu
     },
 
     flux: {

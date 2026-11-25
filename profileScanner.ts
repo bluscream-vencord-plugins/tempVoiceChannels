@@ -31,6 +31,9 @@ export interface IdKind {
     maxLength?: number;
 }
 
+/** Where an ID came from, as shown in the Copy ID menu and stored with remembered IDs. */
+export const PROFILE_SOURCE = "profile";
+
 /** Finds every ID of one kind in free text, without duplicates. */
 export function findIds(text: string, kind: IdKind) {
     const found = new Map<string, string>();
@@ -71,7 +74,7 @@ function profileText(userId: string, guildId: string) {
 /** The IDs of one kind in a user's loaded profiles, remembered for later. */
 function profileIds(userId: string, guildId: string, kind: IdKind) {
     const ids = findIds(profileText(userId, guildId), kind);
-    rememberIds(userId, ids.map(id => ({ id, source: `${kind.label} from their profile` })));
+    rememberIds(userId, ids.map(id => ({ id, source: PROFILE_SOURCE })));
     return ids;
 }
 
