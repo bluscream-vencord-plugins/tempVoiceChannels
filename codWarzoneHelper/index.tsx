@@ -19,7 +19,7 @@ const server: TempVoiceServer = {
     presets: () => settings.store.presets,
     isPanel: m => isPanel(m.components),
     // "🎮 Kanal erstellt von: @owner"
-    isCreatedNotice: (m, userId) => m.content.includes("Kanal erstellt von") && m.content.includes(`<@${userId}>`),
+    isCreatedNotice: (m, userId) => m.content.includes("Kanal erstellt von") && new RegExp(`<@!?${userId}>`).test(m.content),
 
     async applyPreset(api, channelId, preset) {
         await api.pause(1500, 2500);
@@ -27,25 +27,27 @@ const server: TempVoiceServer = {
         const panel = await api.waitForPanel();
         if (!panel) return api.fail("Voice panel not found.");
 
-        // The bot's rename form also sets the channel status.
+        // The bot's rename form also sets the channel status. With only a status, the name stays as it is,
+        // so the check passes as soon as the form was sent.
         if (preset.name || preset.status) {
-            const name = preset.name || ChannelStore.getChannel(channelId)?.name || "";
+            const name = (preset.name || ChannelStore.getChannel(channelId)?.name || "").trim();
             await api.pause(1500, 2500);
-            await api.submitModal(panel, "rename_button", "rename_modal", { channel_name: name, channel_status: preset.status },
-                () => ChannelStore.getChannel(channelId)?.name === name, "Rename");
+            const renamed = await api.submitModal(panel, "rename_button", "rename_modal", { channel_name: name, channel_status: preset.status },
+                () => ChannelStore.getChannel(channelId)?.name.trim() === name, "Rename");
+            if (!renamed) return;
         }
 
         if (preset.limit) {
             const { limit } = preset;
             await api.pause(1500, 2500);
-            await api.submitModal(panel, "limit_button", "limit_modal", { channel_limit: String(limit) },
+            const limited = await api.submitModal(panel, "limit_button", "limit_modal", { channel_limit: String(limit) },
                 () => ChannelStore.getChannel(channelId)?.userLimit === limit, "Setting the user limit");
+            if (!limited) return;
         }
 
         if (preset.privacy !== "unchanged") {
             await api.pause(1500, 2500);
             await api.clickButton(panel, preset.privacy === "private" ? "private_button" : "public_button");
-            await api.pause(1500, 2500);
         }
 
         if (settings.store.clickPanelOnCreate) {

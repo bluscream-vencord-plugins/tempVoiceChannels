@@ -8,7 +8,7 @@ Equicord user plugins for the temp voice channel bots on two German Call of Duty
 | `codWarzoneHelper` | CodWarzoneHelper | "⭐ Call of Duty: Warzone & MW4 \| Deutschland" and its V3NOM bot: rename, status, user limit, visibility, voice logs, Activision IDs, and copying the Activision ID of people in a channel you join. |
 | `warzoneDeutschlandHelper` | WarzoneDeutschlandHelper | "Call of Duty: Warzone Deutschland" and its Xavis bot: channel status. |
 
-Each server plugin registers its bot with TempVoiceChannels when it starts. Its server and bot IDs are hidden settings, so they can be changed without editing code.
+Each server plugin registers its bot with TempVoiceChannels when it starts. Its server and bot IDs are stored as hidden settings with the defaults above. They have no UI, but can be changed in the settings file without touching the code.
 
 ## Install
 
@@ -22,11 +22,12 @@ foreach ($d in "tempVoiceChannels", "codWarzoneHelper", "warzoneDeutschlandHelpe
 }
 ```
 
-The checkout has to stay inside the Equicord source tree; otherwise the build can't resolve Equicord's `@utils/…` imports. Then rebuild Equicord and enable the plugin for your server.
+The checkout has to stay inside the Equicord source tree; otherwise the build can't resolve Equicord's `@utils/…` imports. Then rebuild Equicord and enable the plugin for your server. The first time, Discord needs a restart, because TempVoiceChannels patches how bot forms are shown.
 
 ## Features
 
 - Right-click a create channel, its category, the server icon or the server name to create a channel from a preset.
-- Joining a create channel yourself applies the first preset for it once the bot has moved you.
+- The Equicord Toolbox has a TempVoiceChannels section: one heading per server (its icon, name and owner) that opens that plugin's settings, with all its presets below to create a channel from anywhere in Discord. Clicking TempVoiceChannels itself opens the shared settings.
+- Joining a create channel yourself applies the first preset for it once the bot has moved you. Presets are only applied after the bot's own message confirms the new channel is yours.
 - Presets are edited in each server plugin's settings with collapsible cards and drag and drop ordering. Only the fields that server's bot supports are shown.
 - Every action waits a configurable, slightly randomised delay so the bot has time to respond.
