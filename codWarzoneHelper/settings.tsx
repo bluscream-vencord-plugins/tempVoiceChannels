@@ -7,7 +7,7 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
-import { serverSettings } from "../tempVoiceChannels/presets";
+import { Preset, serverSettings } from "../tempVoiceChannels/presets";
 
 const PRESET_KEYS: ["presets"] = ["presets"];
 
@@ -15,10 +15,10 @@ export const settings = definePluginSettings({
     ...serverSettings({
         defaultGuildId: "500074231544152074",
         defaultBotId: "1515388147759059015",
-        guildId: () => settings.store.guildId,
+        guildId: (): string => settings.store.guildId,
         fields: { name: true, limit: true, privacy: true },
         description: "Each preset joins a create channel, waits for the bot to move you, then renames the new channel and sets its status, user limit and visibility.",
-        usePresets: () => settings.use(PRESET_KEYS).presets,
+        usePresets: (): Preset[] => settings.use(PRESET_KEYS).presets,
         savePresets: presets => settings.store.presets = presets,
         defaultPresets: [
             { id: "rebirth-casual", name: "Rebirth Casual", status: "Casual Rebirth, jeder willkommen", creatorId: "1075199439704170516", limit: 0, privacy: "unchanged" }

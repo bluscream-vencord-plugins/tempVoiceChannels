@@ -6,21 +6,11 @@
 
 import { copyToClipboard } from "@utils/clipboard";
 import definePlugin from "@utils/types";
-import type { Message } from "@vencord/discord-types";
 import { ChannelStore, showToast } from "@webpack/common";
 
-import { registerServer, TempVoiceApi, TempVoiceServer, unregisterServer } from "../tempVoiceChannels";
-import { ActivisionEntry, isPanel, LogEntry, parseActivision, parseLogs } from "./parsers";
+import { registerServer, TempVoiceServer, unregisterServer } from "../tempVoiceChannels";
+import { isPanel, parseActivision, parseLogs } from "./parsers";
 import { settings } from "./settings";
-
-export const lastLogs = new Map<string, LogEntry[]>();
-export const lastActivision = new Map<string, ActivisionEntry[]>();
-
-async function fetchActivision(api: TempVoiceApi, panel: Message) {
-    const entries = await api.clickButton(panel, "activision_button", parseActivision);
-    if (entries) lastActivision.set(panel.channel_id, entries);
-    return entries;
-}
 
 const server: TempVoiceServer = {
     name: "CodWarzoneHelper",
@@ -33,8 +23,8 @@ const server: TempVoiceServer = {
 
     async applyPreset(api, channelId, preset) {
         await api.pause(1500, 2500);
-        api.openChat(channelId);
-        const panel = await api.waitForPanel(channelId);
+        api.openChat();
+        const panel = await api.waitForPanel();
         if (!panel) return api.fail("Voice panel not found.");
 
         // The bot's rename form also sets the channel status.
@@ -60,22 +50,21 @@ const server: TempVoiceServer = {
 
         if (settings.store.clickPanelOnCreate) {
             await api.pause(2000, 3000);
-            const logs = await api.clickButton(panel, "logs_button", parseLogs);
-            if (logs) lastLogs.set(channelId, logs);
+            await api.clickButton(panel, "logs_button", parseLogs);
             await api.pause(2500, 3500);
-            await fetchActivision(api, panel);
+            await api.clickButton(panel, "activision_button", parseActivision);
             await api.pause(800, 1200);
             api.scrollToBottom();
         }
     },
 
-    async onJoinOthers(api, channelId, others) {
+    async onJoinOthers(api, _channelId, others) {
         if (!settings.store.copyActivisionOnJoin) return;
-        const panel = await api.waitForPanel(channelId);
+        const panel = await api.waitForPanel();
         if (!panel) return;
-        api.openChat(channelId);
+        api.openChat();
         await api.pause(1500, 2500);
-        const entries = await fetchActivision(api, panel);
+        const entries = await api.clickButton(panel, "activision_button", parseActivision);
         await api.pause(800, 1200);
         api.scrollToBottom();
         if (!entries) return api.fail("The bot didn't send any Activision IDs.");
@@ -83,7 +72,7 @@ const server: TempVoiceServer = {
         const found = entries.filter(e => others.includes(e.userId));
         if (!found.length) return showToast({ text: "Nobody else here has linked an Activision ID." });
 
-        copyToClipboard(found[0].activisionId);
+        await copyToClipboard(found[0].activisionId);
         const rest = found.slice(1).map(e => e.activisionId);
         showToast({
             text: `Copied ${found[0].activisionId}${rest.length ? `. Also here: ${rest.join(", ")}` : ""}`,

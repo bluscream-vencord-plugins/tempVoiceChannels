@@ -14,7 +14,7 @@ import { findByCodeLazy, findByPropsLazy } from "@webpack";
 import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
-import { creatorLabel, Preset, withDefaults } from "./presets";
+import { creatorLabel, isCreatorName, Preset, withDefaults } from "./presets";
 
 const logger = new Logger("TempVoiceChannels");
 
@@ -58,18 +58,22 @@ export interface TempVoiceServer {
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
 }
 
+/**
+ * Helpers for one flow in one channel. Every wait stops the flow quietly once you leave
+ * that channel or the server plugin is turned off.
+ */
 export interface TempVoiceApi {
     logger: Logger;
     /** The ranges are tuned for the default 2000 ms delay and scale with the setting. */
     pause(min: number, max: number): Promise<void>;
     fail(text: string): void;
-    openChat(channelId: string): void;
+    openChat(): void;
     scrollToBottom(): void;
     waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], timeout: number): Promise<T | null>;
-    waitForPanel(channelId: string): Promise<Message | null>;
+    waitForPanel(): Promise<Message | null>;
     clickButton<T>(panel: Message, customId: string, parse?: (components: Component[] | undefined) => T | null): Promise<T | null>;
     submitModal(panel: Message, button: string, modalId: string, values: ModalValues, applied: () => boolean, what: string): Promise<void>;
-    setStatus(channelId: string, status: string): Promise<void>;
+    setStatus(status: string): Promise<void>;
 }
 
 const servers = new Map<string, TempVoiceServer>();
@@ -83,8 +87,6 @@ export function unregisterServer(name: string) {
 }
 
 const serverFor = (guildId: string | undefined) => [...servers.values()].find(s => s.guildId() === guildId);
-
-export const isCreator = (channel: Channel | undefined) => !!channel && !!serverFor(channel.guild_id) && channel.name.includes("➕");
 
 interface RawMessage {
     author?: { id: string; };
@@ -110,24 +112,29 @@ function fillModal(list: Component[], values: ModalValues): unknown[] {
     });
 }
 
-let pendingModal: { channelId: string; modalId: string; values: ModalValues; opened: boolean; } | null = null;
+interface PendingModal {
+    channelId: string;
+    modalId: string;
+    values: ModalValues;
+    /** Resolves true once the filled form was sent, false if sending failed. */
+    submitted(ok: boolean): void;
+}
+
+let pendingModal: PendingModal | null = null;
 let creating = false;
 let lastVoiceChannel: string | null = null;
 
 const myVoiceChannel = () => SelectedChannelStore.getVoiceChannelId() ?? null;
+const fail = (text: string) => showToast({ text, variant: "critical" });
 
 function managedServer(id: string | null) {
     const channel = id ? ChannelStore.getChannel(id) : undefined;
-    if (!channel?.isGuildVoice() || channel.name.includes("➕")) return null;
+    if (!channel?.isGuildVoice() || isCreatorName(channel.name)) return null;
     return serverFor(channel.guild_id) ?? null;
 }
 
 function findBotMessage(server: TempVoiceServer, channelId: string, match: (m: Message) => boolean) {
-    let found: Message | null = null;
-    MessageStore.getMessages(channelId).forEach(m => {
-        if (m.author.id === server.botId() && match(m)) found = m;
-    });
-    return found as Message | null;
+    return MessageStore.getMessages(channelId)._array.findLast(m => m.author.id === server.botId() && match(m)) ?? null;
 }
 
 function waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], timeout: number): Promise<T | null> {
@@ -148,26 +155,46 @@ function waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], tim
     });
 }
 
-function makeApi(server: TempVoiceServer): TempVoiceApi {
+function timeout<T>(promise: Promise<T>, ms: number, fallback: T) {
+    return Promise.race([promise, sleep(ms).then(() => fallback)]);
+}
+
+/** Thrown inside a flow to stop it quietly. */
+class FlowCancelled extends Error { }
+
+function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
     const serverLogger = new Logger(server.name);
+
+    const ensureAlive = () => {
+        if (servers.get(server.name) !== server || myVoiceChannel() !== channelId) throw new FlowCancelled();
+    };
 
     const api: TempVoiceApi = {
         logger: serverLogger,
-        pause: (min, max) => sleep((min + Math.random() * (max - min)) * settings.store.actionDelay / 2000),
-        fail: text => showToast({ text, variant: "critical" }),
+        fail,
 
-        openChat(channelId) {
+        async pause(min, max) {
+            await sleep((min + Math.random() * (max - min)) * settings.store.actionDelay / 2000);
+            ensureAlive();
+        },
+
+        openChat() {
             if (settings.store.openChat && SelectedChannelStore.getChannelId() !== channelId)
                 ChannelRouter.transitionToChannel(channelId);
         },
 
         scrollToBottom: () => ComponentDispatch.dispatch("SCROLLTO_PRESENT"),
-        waitFor,
 
-        waitForPanel(channelId) {
+        async waitFor(check, events, ms) {
+            const value = await waitFor(check, events, ms);
+            ensureAlive();
+            return value;
+        },
+
+        waitForPanel() {
             const find = () => findBotMessage(server, channelId, server.isPanel);
             if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-            return waitFor(find, ["MESSAGE_CREATE", "MESSAGE_UPDATE", "LOAD_MESSAGES_SUCCESS"], 20_000);
+            return api.waitFor(find, ["MESSAGE_CREATE", "MESSAGE_UPDATE", "LOAD_MESSAGES_SUCCESS"], 20_000);
         },
 
         // Clicks a panel button and resolves with the first bot reply to that click that the parser accepts.
@@ -208,22 +235,30 @@ function makeApi(server: TempVoiceServer): TempVoiceApi {
             return reply;
         },
 
-        // Clicks a panel button that opens a bot form, fills it in the background and waits until applied() holds.
+        // Clicks a panel button that opens a bot form, fills it in the background, then waits until applied() holds.
         async submitModal(panel, button, modalId, values, applied, what) {
-            const pending = pendingModal = { channelId: panel.channel_id, modalId, values, opened: false };
+            if (!findComponent(panel.components, button)) return fail(`${what} isn't available, the bot's panel has no button for it.`);
+
+            const submitted = new Promise<boolean>(resolve => {
+                pendingModal = { channelId, modalId, values, submitted: resolve };
+            });
             api.clickButton(panel, button, components => getText(components) || null)
                 .then(reply => serverLogger.info(`${what}: bot replied`, reply ?? "nothing"));
-            const ok = await waitFor(() => applied() || null, ["CHANNEL_UPDATES"], 15_000);
+
+            const sent = await timeout(submitted, 15_000, false);
             pendingModal = null;
-            if (ok) return;
-            api.fail(pending.opened ? `${what} didn't go through. The bot got the form but didn't apply it.` : `${what} didn't go through. The bot never opened its form.`);
-            serverLogger.warn(`${what} failed`, { opened: pending.opened, values });
+            ensureAlive();
+            if (!sent) return fail(`${what} didn't go through. The bot never opened its form.`);
+
+            if (await api.waitFor(() => applied() || null, ["CHANNEL_UPDATES"], 15_000)) return;
+            fail(`${what} didn't go through. The bot got the form but didn't apply it.`);
+            serverLogger.warn(`${what} failed`, values);
         },
 
-        async setStatus(channelId, status) {
-            await RestAPI.put({ url: `/channels/${channelId}/voice-status`, body: { status } })
+        async setStatus(status) {
+            await RestAPI.put({ url: Constants.Endpoints.UPDATE_VOICE_CHANNEL_STATUS(channelId), body: { status } })
                 .catch(err => {
-                    api.fail("Setting the channel status didn't go through.");
+                    fail("Setting the channel status didn't go through.");
                     serverLogger.warn("Setting status failed", err);
                 });
         }
@@ -231,29 +266,33 @@ function makeApi(server: TempVoiceServer): TempVoiceApi {
     return api;
 }
 
-async function runPreset(server: TempVoiceServer, channelId: string, preset: Preset) {
+/** Runs one flow, stopping quietly when it was cancelled and reporting anything else that went wrong. */
+async function runFlow(server: TempVoiceServer, channelId: string, flow: (api: TempVoiceApi) => Promise<void>) {
     try {
-        await server.applyPreset(makeApi(server), channelId, preset);
+        await flow(makeApi(server, channelId));
+    } catch (err) {
+        if (err instanceof FlowCancelled) return;
+        logger.error(`${server.name} failed`, err);
+        fail("Something went wrong while handling the voice channel. Check the console for details.");
     } finally {
         pendingModal = null;
     }
 }
-
-const fail = (text: string) => showToast({ text, variant: "critical" });
 
 async function createChannel(server: TempVoiceServer, preset: Preset) {
     if (creating) return fail("Already creating a channel.");
     if (!ChannelStore.getChannel(preset.creatorId)) return fail(`The create channel for ${preset.name || "this preset"} doesn't exist anymore.`);
     creating = true;
     try {
+        const before = myVoiceChannel();
         ChannelActions.selectVoiceChannel(preset.creatorId);
         const channelId = await waitFor(() => {
             const id = myVoiceChannel();
-            return managedServer(id) ? id : null;
+            return id !== before && managedServer(id) === server ? id : null;
         }, ["VOICE_STATE_UPDATES", "VOICE_CHANNEL_SELECT"], 20_000);
         if (!channelId) return fail("The bot didn't move you to a new channel.");
         lastVoiceChannel = channelId;
-        await runPreset(server, channelId, preset);
+        await runFlow(server, channelId, api => server.applyPreset(api, channelId, preset));
     } finally {
         creating = false;
     }
@@ -266,24 +305,27 @@ async function onManualCreate(server: TempVoiceServer, creatorId: string, channe
 
     creating = true;
     try {
-        const me = UserStore.getCurrentUser().id;
-        const find = () => findBotMessage(server, channelId, m => server.isCreatedNotice(m, me));
-        if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-        const notice = await waitFor(find, ["MESSAGE_CREATE", "LOAD_MESSAGES_SUCCESS"], 20_000);
-        if (!notice || myVoiceChannel() !== channelId) return;
-        await runPreset(server, channelId, preset);
+        await runFlow(server, channelId, async api => {
+            const me = UserStore.getCurrentUser().id;
+            const find = () => findBotMessage(server, channelId, m => server.isCreatedNotice(m, me));
+            if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
+            if (await api.waitFor(find, ["MESSAGE_CREATE", "LOAD_MESSAGES_SUCCESS"], 20_000))
+                await server.applyPreset(api, channelId, preset);
+        });
     } finally {
         creating = false;
     }
 }
 
-async function onJoin(server: TempVoiceServer, channelId: string) {
-    if (!server.onJoinOthers) return;
-    const api = makeApi(server);
-    await api.pause(2000, 3000);
-    const me = UserStore.getCurrentUser().id;
-    const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
-    if (others.length && myVoiceChannel() === channelId) await server.onJoinOthers(api, channelId, others);
+function onJoin(server: TempVoiceServer, channelId: string) {
+    const { onJoinOthers } = server;
+    if (!onJoinOthers) return;
+    return runFlow(server, channelId, async api => {
+        await api.pause(2000, 3000);
+        const me = UserStore.getCurrentUser().id;
+        const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
+        if (others.length) await onJoinOthers.call(server, api, channelId, others);
+    });
 }
 
 function CreateMenu(server: TempVoiceServer, presets: Preset[], withCategory: boolean) {
@@ -310,7 +352,7 @@ const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { chann
     if (!channel || !server) return;
     const presets = server.presets().map(withDefaults)
         .filter(p => p.creatorId === channel.id || ChannelStore.getChannel(p.creatorId)?.parent_id === channel.id);
-    if (isCreator(channel) || presets.length) children.push(<Menu.MenuSeparator />, CreateMenu(server, presets, false));
+    if (isCreatorName(channel.name) || presets.length) children.push(<Menu.MenuSeparator />, CreateMenu(server, presets, false));
 };
 
 const guildMenu: NavContextMenuPatchCallback = (children, { guild }: { guild?: Guild; }) => {
@@ -334,10 +376,15 @@ export default definePlugin({
         }
     ],
 
+    start() {
+        // Without this, being in voice during a reload would look like a fresh join.
+        lastVoiceChannel = myVoiceChannel();
+    },
+
     // Fills a bot form the plugin asked for in the background instead of showing it.
     interceptModal(e: ModalCreate) {
-        if (!pendingModal || e.channelId !== pendingModal.channelId || e.customId !== pendingModal.modalId) return false;
-        pendingModal.opened = true;
+        const pending = pendingModal;
+        if (!pending || e.channelId !== pending.channelId || e.customId !== pending.modalId) return false;
         RestAPI.post({
             url: Constants.Endpoints.INTERACTIONS,
             body: {
@@ -345,11 +392,17 @@ export default definePlugin({
                 application_id: e.application.id,
                 channel_id: e.channelId,
                 guild_id: ChannelStore.getChannel(e.channelId)?.guild_id,
-                data: { id: e.id, custom_id: e.customId, components: fillModal(e.components, pendingModal.values) },
+                data: { id: e.id, custom_id: e.customId, components: fillModal(e.components, pending.values) },
                 session_id: AuthenticationStore.getSessionId(),
                 nonce: SnowflakeUtils.fromTimestamp(Date.now())
             }
-        }).catch(err => logger.error("Form submit failed", err));
+        }).then(
+            () => pending.submitted(true),
+            err => {
+                logger.error("Form submit failed", err);
+                pending.submitted(false);
+            }
+        );
         return true;
     },
 
@@ -368,8 +421,9 @@ export default definePlugin({
             const server = managedServer(current);
             if (creating || !server || !current) return;
             const previousChannel = previous ? ChannelStore.getChannel(previous) : undefined;
-            if (previous && previousChannel?.guild_id === server.guildId() && previousChannel.name.includes("➕")) onManualCreate(server, previous, current);
-            else onJoin(server, current);
+            if (previous && previousChannel?.guild_id === server.guildId() && isCreatorName(previousChannel.name))
+                return onManualCreate(server, previous, current);
+            return onJoin(server, current);
         }
     }
 });
