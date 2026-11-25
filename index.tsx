@@ -12,18 +12,18 @@ import { Flex } from "@components/Flex";
 import { PencilIcon } from "@components/Icons";
 import { Paragraph } from "@components/Paragraph";
 import { openPluginModal } from "@components/settings/tabs/plugins/PluginModal";
-import { Logger } from "@utils/Logger";
-import { sleep } from "@utils/misc";
-import definePlugin, { OptionType } from "@utils/types";
 import { copyWithToast } from "@utils/discord";
+import { Logger } from "@utils/Logger";
+import { pluralize, sleep } from "@utils/misc";
+import definePlugin, { OptionType } from "@utils/types";
 import type { Channel, FluxEvents, Guild, Message, User } from "@vencord/discord-types";
 import { findByCodeLazy } from "@webpack";
 import { Alerts, AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageActions, MessageStore, moment, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, useState, VoiceStateStore } from "@webpack/common";
 
-import { Component, findComponent, getText } from "./components";
+import { Component, findComponent } from "./components";
+import { clearRememberedIds, loadRememberedIds, rememberedCount, rememberedIds } from "./idStore";
 import { PATTERNS } from "./patterns";
 import { creatorLabel, getCreators, isCreatorChannel, Preset, presetTitle, withDefaults } from "./presets";
-import { clearRememberedIds, loadRememberedIds, rememberedCount, rememberedIds } from "./idStore";
 import { cachedIds, forgetScanned, IdKind, PROFILE_SOURCE, scanProfiles } from "./profileScanner";
 
 const logger = new Logger("TempVoiceChannels");
@@ -34,14 +34,19 @@ function ClearRememberedIds() {
     const [{ users, ids }, setCount] = useState(rememberedCount);
     const clear = () => Alerts.show({
         title: "Forget all remembered IDs?",
-        body: `This removes ${ids} IDs of ${users} people from this computer. It can't be undone.`,
+        body: `This removes ${pluralize(ids, "ID")} of ${pluralize(users, "person", "people")} from this computer. It can't be undone.`,
         confirmText: "Forget them",
         cancelText: "Cancel",
-        onConfirm: () => clearRememberedIds().then(() => setCount(rememberedCount()))
+        onConfirm: () => clearRememberedIds()
+            .then(() => setCount(rememberedCount()))
+            .catch(err => {
+                logger.error("Couldn't clear the remembered IDs", err);
+                fail("Couldn't forget the remembered IDs. Check the console for details.");
+            })
     });
     return (
         <Flex alignItems="center" gap="1em">
-            <Paragraph>{ids} IDs of {users} people remembered.</Paragraph>
+            <Paragraph>{pluralize(ids, "ID")} of {pluralize(users, "person", "people")} remembered.</Paragraph>
             <Button variant="dangerSecondary" size="small" disabled={!ids} onClick={clear}>Forget all</Button>
         </Flex>
     );
@@ -67,7 +72,7 @@ const settings = definePluginSettings({
     },
     rememberIds: {
         type: OptionType.BOOLEAN,
-        description: "Remember every ID found for someone, from profiles or a server's bot, even after they remove it. Stored only on this computer, and used for the Copy ID menu.",
+        description: "Remember every ID found for someone, from profiles or a server's bot, even after they remove it. Stored only on this computer, and used for the Copy ID menu. Turning this off stops remembering new IDs; use Forget all to remove the ones already stored.",
         default: true
     },
     clearRememberedIds: {
@@ -76,7 +81,7 @@ const settings = definePluginSettings({
     },
     openChat: {
         type: OptionType.BOOLEAN,
-        description: "When a server plugin creates or joins a channel for you, open its chat so you can see what it clicked and what the bot replied.",
+        description: "When a server plugin creates or joins a channel for you, open its chat so you can see what it clicked, what the bot replied and the IDs found in profiles.",
         default: true
     }
 });
@@ -110,17 +115,15 @@ export interface TempVoiceServer {
 }
 
 /**
- * Helpers for one flow in one channel. Every wait stops the flow quietly once you leave
- * that channel or the server plugin is turned off.
+ * Helpers for one flow in one channel. Pauses and waits stop the flow quietly once you leave
+ * that channel or the server plugin is turned off; single clicks and requests don't wait, so they don't check.
  */
 export interface TempVoiceApi {
-    logger: Logger;
     /** The ranges are tuned for the default 2000 ms delay and scale with the setting. */
     pause(min: number, max: number): Promise<void>;
     fail(text: string): void;
     openChat(): void;
     scrollToBottom(): void;
-    waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], timeout: number): Promise<T | null>;
     waitForPanel(): Promise<Message | null>;
     clickButton<T>(panel: Message, customId: string, parse?: (components: Component[] | undefined) => T | null): Promise<T | null>;
     /** Resolves true once the bot applied the form, false after telling you it didn't. */
@@ -176,7 +179,7 @@ function fillModal(list: Component[], values: ModalValues): unknown[] {
     });
 }
 
-type SubmitResult = "sent" | "failed" | "unsupported";
+type SubmitResult = "sent" | "failed" | "unsupported" | "timeout";
 
 interface PendingModal {
     channelId: string;
@@ -198,14 +201,24 @@ let request: CreateRequest | null = null;
 let settingUp: string | null = null;
 let lastVoiceChannel: string | null = null;
 const ownerLookups = new Set<string>();
+/**
+ * Profile scans per channel, run one after another. A join flow holds its channel's queue until the server's
+ * own join actions are done, so people who join meanwhile are scanned after the bot showed its IDs.
+ */
+const scanQueue = new Map<string, Promise<void>>();
 
 const myVoiceChannel = () => SelectedChannelStore.getVoiceChannelId() ?? null;
 const fail = (text: string) => showToast({ text, variant: "critical" });
 
+function openChat(channelId: string) {
+    if (settings.store.openChat && SelectedChannelStore.getChannelId() !== channelId)
+        ChannelRouter.transitionToChannel(channelId);
+}
+
 /** A voice channel in a category that has a create channel, on a registered server. */
 function managedServer(id: string | null) {
     const channel = id ? ChannelStore.getChannel(id) : undefined;
-    if (!channel?.isGuildVoice() || isCreatorChannel(channel)) return null;
+    if (!channel?.isGuildVoice() || !channel.parent_id || isCreatorChannel(channel)) return null;
     const server = serverFor(channel.guild_id);
     if (!server || !getCreators(channel.guild_id).some(c => c.parent_id === channel.parent_id)) return null;
     return server;
@@ -213,6 +226,10 @@ function managedServer(id: string | null) {
 
 function findBotMessage(server: TempVoiceServer, channelId: string, match: (m: Message) => boolean) {
     return MessageStore.getMessages(channelId)._array.findLast(m => m.author.id === server.botId() && match(m)) ?? null;
+}
+
+function fetchRecentMessages(channelId: string) {
+    MessageActions.fetchMessages({ channelId, limit: PATTERNS.messageFetchLimit });
 }
 
 function waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], timeout: number): Promise<T | null> {
@@ -242,9 +259,13 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
     const ensureAlive = () => {
         if (servers.get(server.name) !== server || myVoiceChannel() !== channelId) throw new FlowCancelled();
     };
+    const waitAlive = async <T,>(check: () => T | null | undefined, events: FluxEvents[], ms: number) => {
+        const value = await waitFor(check, events, ms);
+        ensureAlive();
+        return value;
+    };
 
     const api: TempVoiceApi = {
-        logger: serverLogger,
         fail,
 
         async pause(min, max) {
@@ -252,25 +273,16 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
             ensureAlive();
         },
 
-        openChat() {
-            if (settings.store.openChat && SelectedChannelStore.getChannelId() !== channelId)
-                ChannelRouter.transitionToChannel(channelId);
-        },
+        openChat: () => openChat(channelId),
 
         scrollToBottom() {
             if (SelectedChannelStore.getChannelId() === channelId) ComponentDispatch.dispatch(PATTERNS.events.scrollToPresent);
         },
 
-        async waitFor(check, events, ms) {
-            const value = await waitFor(check, events, ms);
-            ensureAlive();
-            return value;
-        },
-
         waitForPanel() {
             const find = () => findBotMessage(server, channelId, server.isPanel);
-            if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-            return api.waitFor(find, PATTERNS.events.panelChanged, 20_000);
+            if (!find()) fetchRecentMessages(channelId);
+            return waitAlive(find, PATTERNS.events.panelChanged, 20_000);
         },
 
         // Clicks a panel button and resolves with the first bot reply to that click that the parser accepts.
@@ -314,16 +326,20 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
 
         // Clicks a panel button that opens a bot form, fills it in the background, then waits until applied() holds.
         async submitModal(panel, button, modalId, values, applied, what) {
-            if (!findComponent(panel.components, button)) {
-                fail(`${what} isn't available, the bot's panel has no button for it.`);
+            const found = findComponent(panel.components, button);
+            if (!found || found.disabled) {
+                fail(`${what} isn't available, the bot's panel has no usable button for it.`);
                 return false;
             }
 
-            let mine: PendingModal | null = null;
-            const submitted = new Promise<SubmitResult | "timeout">(resolve => {
-                mine = pendingModal = { channelId, modalId, values, resolve };
-                setTimeout(() => resolve("timeout"), 15_000);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            let resolveSubmit: (result: SubmitResult) => void = () => { };
+            const submitted = new Promise<SubmitResult>(resolve => {
+                resolveSubmit = resolve;
+                timer = setTimeout(() => resolve("timeout"), 15_000);
             });
+            const mine: PendingModal = { channelId, modalId, values, resolve: resolveSubmit };
+            pendingModal = mine;
             try {
                 api.clickButton(panel, button);
                 const result = await submitted;
@@ -337,10 +353,11 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
                     return false;
                 }
             } finally {
+                clearTimeout(timer);
                 if (pendingModal === mine) pendingModal = null;
             }
 
-            if (await api.waitFor(() => applied() || null, PATTERNS.events.channelUpdated, 15_000)) return true;
+            if (await waitAlive(() => applied() || null, PATTERNS.events.channelUpdated, 15_000)) return true;
             fail(`${what} didn't go through. The bot got the form but didn't apply it.`);
             serverLogger.warn(`${what} failed`, values);
             return false;
@@ -399,8 +416,10 @@ function onCreated(server: TempVoiceServer, creatorId: string, channelId: string
         // Only the bot's "you created this channel" message proves it's yours and not one you clicked into.
         const me = UserStore.getCurrentUser().id;
         const find = () => findBotMessage(server, channelId, m => server.isCreatedNotice(m, me));
-        if (!find()) MessageActions.fetchMessages({ channelId, limit: 50 });
-        if (await api.waitFor(find, PATTERNS.events.messageArrived, 20_000)) {
+        if (!find()) fetchRecentMessages(channelId);
+        const notice = await waitFor(find, PATTERNS.events.messageArrived, 20_000);
+        if (myVoiceChannel() !== channelId) return;
+        if (notice) {
             if (preset) await server.applyPreset(api, channelId, preset);
             return;
         }
@@ -417,17 +436,34 @@ async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: s
     const me = UserStore.getCurrentUser().id;
     const others = Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId)).filter(id => id !== me);
     if (!others.length) return;
+
     // The server's own join actions go first, so the profile scan can leave out IDs its bot already showed.
-    if (server.onJoinOthers) await server.onJoinOthers(api, channelId, others);
-    scanFor(server, channelId, others);
+    // Holding the queue makes people who join meanwhile wait for that too.
+    let release = () => { };
+    queueScan(channelId, () => new Promise<void>(resolve => { release = resolve; }));
+    try {
+        if (server.onJoinOthers) await server.onJoinOthers(api, channelId, others);
+    } finally {
+        release();
+        scanFor(server, channelId, others, true);
+    }
 }
 
-function scanFor(server: TempVoiceServer, channelId: string, userIds: string[]) {
-    if (settings.store.scanProfiles && server.profileIds?.length)
-        // The IDs are posted in the channel's chat, so open it if you're still there, or you'd never see them.
-        scanProfiles(channelId, server.guildId(), userIds, server.profileIds, () => {
-            if (myVoiceChannel() === channelId) makeApi(server, channelId).openChat();
-        }, userId => server.knownIds?.(channelId, userId) ?? []).catch(err => logger.error("Scanning profiles failed", err));
+function queueScan(channelId: string, task: () => Promise<void>) {
+    const next = (scanQueue.get(channelId) ?? Promise.resolve()).then(task).catch(err => logger.error("Scanning profiles failed", err));
+    scanQueue.set(channelId, next);
+}
+
+/** `fromJoin`: you just joined, so opening the chat to show what was found is expected. */
+function scanFor(server: TempVoiceServer, channelId: string, userIds: string[], fromJoin: boolean) {
+    const kinds = server.profileIds;
+    if (!settings.store.scanProfiles || !kinds?.length) return;
+    queueScan(channelId, () => scanProfiles(channelId, server.guildId(), userIds, kinds, {
+        isActive: () => myVoiceChannel() === channelId && servers.get(server.name) === server,
+        knownIds: userId => server.knownIds?.(channelId, userId) ?? [],
+        // The IDs are posted in the channel's chat, so after your own join open it, or you'd never see them.
+        onFound: fromJoin ? () => openChat(channelId) : undefined
+    }));
 }
 
 interface VoiceStateChange {
@@ -439,11 +475,12 @@ interface VoiceStateChange {
 // Someone else joined the channel you're in.
 function onOthersJoined(voiceStates: VoiceStateChange[]) {
     const mine = myVoiceChannel();
-    const server = managedServer(mine);
-    if (!mine || !server) return;
+    if (!mine) return;
     const me = UserStore.getCurrentUser().id;
     const joined = voiceStates.filter(s => s.userId !== me && s.channelId === mine && s.oldChannelId !== mine).map(s => s.userId);
-    if (joined.length) scanFor(server, mine, joined);
+    if (!joined.length) return;
+    const server = managedServer(mine);
+    if (server) scanFor(server, mine, joined, false);
 }
 
 // Status and create channel on their own lines. The create channel is left out when it's already the title or the menu belongs to it.
@@ -487,13 +524,14 @@ const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { chann
     if (isCreatorChannel(channel) || presets.length) children.push(<Menu.MenuSeparator />, createMenu(server, presets, false));
 };
 
-// Right-clicking someone who's in voice on a registered server, or whose IDs were remembered: copy any ID known for them.
-const userMenu: NavContextMenuPatchCallback = (children, { user }: { user?: User; }) => {
-    if (!user) return;
+/**
+ * Right-clicking someone: copy any ID known for them. The server is the one they're in voice on, or the one the
+ * menu was opened in; remembered IDs show anywhere. Reads caches only, so opening the menu stores nothing.
+ */
+const userMenu: NavContextMenuPatchCallback = (children, { user, guildId }: { user?: User; guildId?: string; }) => {
+    if (!user || user.bot || user.id === UserStore.getCurrentUser().id) return;
     const voiceChannel = VoiceStateStore.getVoiceStateForUser(user.id)?.channelId;
-    const server = serverFor(voiceChannel ? ChannelStore.getChannel(voiceChannel)?.guild_id : undefined);
-    const remembered = rememberedIds(user.id);
-    if (!remembered.length && (!server || (!server.profileIds?.length && !server.otherIds))) return;
+    const server = serverFor(voiceChannel ? ChannelStore.getChannel(voiceChannel)?.guild_id : undefined) ?? serverFor(guildId);
 
     const found = new Map<string, { id: string; source: string; lastSeen?: number; }>();
     const add = (id: string, source: string, lastSeen?: number) => {
@@ -507,10 +545,12 @@ const userMenu: NavContextMenuPatchCallback = (children, { user }: { user?: User
         if (ids) ids.forEach(id => add(id, PROFILE_SOURCE));
         else loading = true;
     }
-    for (const { id, source, lastSeen } of remembered) add(id, source, lastSeen);
+    for (const { id, source, lastSeen } of rememberedIds(user.id)) add(id, source, lastSeen);
+    if (!found.size && !loading) return;
 
     const idPrefix = `vc-tempvoice-copy-id-${user.id}`;
     children.push(
+        <Menu.MenuSeparator />,
         <Menu.MenuItem id={idPrefix} label="Copy ID">
             {[...found.values()].map(({ id, source, lastSeen }) => (
                 <Menu.MenuItem
@@ -523,12 +563,11 @@ const userMenu: NavContextMenuPatchCallback = (children, { user }: { user?: User
                 />
             ))}
             {loading && <Menu.MenuItem id={`${idPrefix}-loading`} label="Loading profile, open the menu again in a moment" disabled />}
-            {!found.size && !loading && <Menu.MenuItem id={`${idPrefix}-none`} label="No IDs known for this user" disabled />}
         </Menu.MenuItem>
     );
 };
 
-const guildMenu: NavContextMenuPatchCallback =(children, { guild }: { guild?: Guild; }) => {
+const guildMenu: NavContextMenuPatchCallback = (children, { guild }: { guild?: Guild; }) => {
     const server = serverFor(guild?.id);
     if (server) children.push(<Menu.MenuSeparator />, createMenu(server, presetsOf(server), true));
 };
@@ -595,6 +634,11 @@ export default definePlugin({
 
     stop() {
         clearRequest();
+        pendingModal?.resolve("timeout");
+        pendingModal = null;
+        settingUp = null;
+        scanQueue.clear();
+        forgetScanned();
     },
 
     // Fills a bot form the plugin asked for in the background instead of showing it.
@@ -608,7 +652,7 @@ export default definePlugin({
         RestAPI.post({
             url: Constants.Endpoints.INTERACTIONS,
             body: {
-                type: 5,
+                type: PATTERNS.modalSubmitInteraction,
                 application_id: e.application.id,
                 channel_id: e.channelId,
                 guild_id: ChannelStore.getChannel(e.channelId)?.guild_id,
@@ -627,10 +671,10 @@ export default definePlugin({
     },
 
     contextMenus: {
-        "channel-context": channelMenu,
-        "guild-context": guildMenu,
-        "guild-header-popout": guildMenu,
-        "user-context": userMenu
+        [PATTERNS.contextMenus.channel]: channelMenu,
+        [PATTERNS.contextMenus.guild]: guildMenu,
+        [PATTERNS.contextMenus.guildHeader]: guildMenu,
+        [PATTERNS.contextMenus.user]: userMenu
     },
 
     flux: {
@@ -639,7 +683,10 @@ export default definePlugin({
             const previous = lastVoiceChannel;
             if (current === previous) return onOthersJoined(voiceStates);
             lastVoiceChannel = current;
-            if (previous) forgetScanned(previous);
+            if (previous) {
+                forgetScanned(previous);
+                scanQueue.delete(previous);
+            }
             const server = managedServer(current);
             if (!server || !current || current === settingUp) return;
             const previousChannel = previous ? ChannelStore.getChannel(previous) : undefined;

@@ -46,7 +46,7 @@ export function creatorLabel(creatorId: string) {
 /** A preset's name, or its create channel when it has none. Used everywhere presets are listed. */
 export const presetTitle = (preset: Preset) => preset.name || creatorLabel(preset.creatorId);
 
-export type Privacy ="unchanged" | "private" | "public";
+export type Privacy = "unchanged" | "private" | "public";
 
 export interface Preset {
     id: string;

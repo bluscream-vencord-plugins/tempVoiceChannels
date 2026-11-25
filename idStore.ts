@@ -26,16 +26,17 @@ const getStore = () => store ??= DataStore.createStore("TempVoiceChannels", "rem
 
 /** Mirrors the database, so menus can read it instantly. */
 const memory = new Map<string, UserIds>();
-let enabled = () => true;
+let enabled = () => false;
+/** Resolves once the database is in memory. Writes wait for it, so they never replace a record that wasn't loaded yet. */
+let loaded: Promise<void> = Promise.resolve();
 
 /** Loads everything remembered into memory. `isEnabled` is checked before anything new is stored. */
-export async function loadRememberedIds(isEnabled: () => boolean) {
+export function loadRememberedIds(isEnabled: () => boolean) {
     enabled = isEnabled;
-    try {
-        for (const [userId, ids] of await DataStore.entries<string, UserIds>(getStore())) memory.set(userId, ids);
-    } catch (err) {
-        logger.error("Couldn't load the remembered IDs", err);
-    }
+    loaded = DataStore.entries<string, UserIds>(getStore())
+        .then(entries => { for (const [userId, ids] of entries) memory.set(userId, ids); })
+        .catch(err => logger.error("Couldn't load the remembered IDs", err));
+    return loaded;
 }
 
 /**
@@ -45,14 +46,16 @@ export async function loadRememberedIds(isEnabled: () => boolean) {
 export function rememberIds(userId: string, ids: { id: string; source: string; }[]) {
     if (!ids.length || !enabled()) return;
     const now = Date.now();
-    const known: UserIds = { ...memory.get(userId) };
-    for (const { id, source } of ids) {
-        const key = id.toLowerCase();
-        const existing = known[key];
-        known[key] = existing ? { ...existing, lastSeen: now } : { id, source, firstSeen: now, lastSeen: now };
-    }
-    memory.set(userId, known);
-    DataStore.set(userId, known, getStore()).catch(err => logger.error("Couldn't save remembered IDs", err));
+    loaded.then(() => {
+        const known: UserIds = { ...memory.get(userId) };
+        for (const { id, source } of ids) {
+            const key = id.toLowerCase();
+            const existing = known[key];
+            known[key] = existing ? { ...existing, lastSeen: now } : { id, source, firstSeen: now, lastSeen: now };
+        }
+        memory.set(userId, known);
+        return DataStore.set(userId, known, getStore());
+    }).catch(err => logger.error("Couldn't save remembered IDs", err));
 }
 
 /** Everything remembered for a user, most recently seen first. */

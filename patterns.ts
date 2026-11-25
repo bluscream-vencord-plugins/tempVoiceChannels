@@ -26,19 +26,34 @@ export const PATTERNS = {
             // stands on its own. In running text it takes 5 to 9, since "Name#1234" there is more likely an old Discord tag.
             patterns: [
                 /** After a separator like "Activision: " or "/", where the name may contain spaces ("bist gut genuuug#3506506"). */
-                /[:|=>/`"'„“\-–][^\S\n]*(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E _.\-]{0,14}[\p{L}\p{N}\uFF01-\uFF5E_.\-]#\d{3,9})(?!\d)/gu,
+                /[:|=>/`"'„“\-–][^\S\n]*(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E _.-]{0,14}[\p{L}\p{N}\uFF01-\uFF5E_.-]#\d{3,9})(?!\d)/gu,
                 /** An ID alone on its line, like a pronouns field holding just the ID. The name may contain spaces too. */
-                /^[^\S\n]*(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E _.\-]{0,14}[\p{L}\p{N}\uFF01-\uFF5E_.\-]#\d{3,9})[^\S\n]*$/gmu,
+                /^[^\S\n]*(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E _.-]{0,14}[\p{L}\p{N}\uFF01-\uFF5E_.-]#\d{3,9})[^\S\n]*$/gmu,
                 /** Anywhere else, without spaces in the name. */
-                /(?<![\p{L}\p{N}\uFF01-\uFF5E_.\-#])(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E_.\-]{1,15}#\d{5,9})(?!\d)/gu,
+                /(?<![\p{L}\p{N}\uFF01-\uFF5E_.#-])(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E_.-]{1,15}#\d{5,9})(?!\d)/gu,
                 /**
                  * Old accounts have no number at all, so a plain name counts only after a label like "Activision ID: Name",
                  * "CoD name = 'Name'" or "Ingame:" followed by the name on the next line, and only if the name ends the line.
+                 * "CoD" and "Call of Duty" need "ID", "Name", "Tag" or "Account" after them, since "CoD: Warzone" is a game mode.
                  */
-                /(?<![\p{L}\p{N}])(?:activision|acti|atvi|cod|call of duty|in-?game)(?:[^\S\n]*[-_]?[^\S\n]*(?:id|name|tag|account|acc))?[^\S\n]*[:=|>\-\u2013]+[^\S\n]*(?:\n[^\S\n]*)?["'\u201E\u201C`]?(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E _.\-]{0,14}[\p{L}\p{N}\uFF01-\uFF5E_.\-])["'\u201C`]?[^\S\n]*$/gimu
+                /(?<![\p{L}\p{N}])(?:(?:activision|acti|atvi|in-?game)(?:[^\S\n]*[-_]?[^\S\n]*(?:id|name|tag|account|acc))?|(?:cod|call of duty)[^\S\n]*[-_]?[^\S\n]*(?:id|name|tag|account|acc))[^\S\n]*[:=|>\u2013-]+[^\S\n]*(?:\n[^\S\n]*)?["'\u201E\u201C`]?(?<id>[\p{L}\p{N}\uFF01-\uFF5E][\p{L}\p{N}\uFF01-\uFF5E _.-]{0,14}[\p{L}\p{N}\uFF01-\uFF5E_.-])["'\u201C`]?[^\S\n]*$/gimu
             ]
         }
     },
+
+    /** Discord context menus the plugins add to. */
+    contextMenus: {
+        channel: "channel-context",
+        guild: "guild-context",
+        guildHeader: "guild-header-popout",
+        user: "user-context"
+    },
+
+    /** Discord interaction type for submitting a bot's form. */
+    modalSubmitInteraction: 5,
+
+    /** How many recent messages to load when looking for a bot's message in a channel. */
+    messageFetchLimit: 50,
 
     /** Discord message component types the plugins read or fill in. */
     componentTypes: {
