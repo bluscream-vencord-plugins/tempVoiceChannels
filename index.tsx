@@ -331,6 +331,16 @@ function onJoin(server: TempVoiceServer, channelId: string) {
     });
 }
 
+// Status and create channel on their own lines. The create channel is left out when it's already the title or the menu belongs to it.
+function presetSubtext(preset: Preset, withCreator: boolean) {
+    const creator = withCreator && preset.name;
+    if (!preset.status && !creator) return undefined;
+    return <>
+        {preset.status && <div>{preset.status}</div>}
+        {creator && <div>{creatorLabel(preset.creatorId)}</div>}
+    </>;
+}
+
 function CreateMenu(server: TempVoiceServer, presets: Preset[], withCategory: boolean) {
     const menuId = `vc-tempvoice-${server.name.toLowerCase()}`;
     return (
@@ -341,7 +351,7 @@ function CreateMenu(server: TempVoiceServer, presets: Preset[], withCategory: bo
                         key={preset.id}
                         id={`${menuId}-create-${preset.id}`}
                         label={preset.name || creatorLabel(preset.creatorId)}
-                        subtext={withCategory ? creatorLabel(preset.creatorId) : preset.status || undefined}
+                        subtext={presetSubtext(preset, withCategory)}
                         action={() => createChannel(server, preset)}
                     />
                 ))
@@ -407,10 +417,7 @@ export default definePlugin({
                             key={preset.id}
                             id={`vc-tempvoice-toolbox-${preset.id}`}
                             label={preset.name || creatorLabel(preset.creatorId)}
-                            subtext={<>
-                                {preset.status && <div>{preset.status}</div>}
-                                {preset.name && <div>{creatorLabel(preset.creatorId)}</div>}
-                            </>}
+                            subtext={presetSubtext(preset, true)}
                             action={() => createChannel(server, preset)}
                         />
                     ))
