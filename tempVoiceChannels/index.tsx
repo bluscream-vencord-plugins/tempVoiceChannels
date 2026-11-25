@@ -14,7 +14,7 @@ import { sleep } from "@utils/misc";
 import definePlugin, { OptionType } from "@utils/types";
 import type { Channel, FluxEvents, Guild, Message } from "@vencord/discord-types";
 import { findByCodeLazy, findByPropsLazy } from "@webpack";
-import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, VoiceStateStore } from "@webpack/common";
+import { AuthenticationStore, ChannelActions, ChannelRouter, ChannelStore, ComponentDispatch, Constants, FluxDispatcher, GuildStore, IconUtils, Menu, MessageStore, RestAPI, SelectedChannelStore, showToast, SnowflakeUtils, UserStore, UserUtils, VoiceStateStore } from "@webpack/common";
 
 import { Component, findComponent, getText } from "./components";
 import { creatorLabel, isCreatorName, Preset, withDefaults } from "./presets";
@@ -383,6 +383,9 @@ export default definePlugin({
     toolboxActions() {
         return [...servers.values()].flatMap((server, index) => {
             const guild = GuildStore.getGuild(server.guildId());
+            const owner = guild ? UserStore.getUser(guild.ownerId) : undefined;
+            // Not cached yet: load it so the owner shows from the next time the menu opens.
+            if (guild && !owner) UserUtils.getUser(guild.ownerId).catch(() => logger.debug(`Owner of ${guild.name} not found`));
             const iconUrl = guild?.icon ? IconUtils.getGuildIconURL({ id: guild.id, icon: guild.icon, size: 32 }) : undefined;
             const presets = server.presets().map(withDefaults);
             return [
@@ -390,7 +393,10 @@ export default definePlugin({
                 <Menu.MenuItem
                     key={`${server.name}-heading`}
                     id={`vc-tempvoice-toolbox-${server.name}`}
-                    label={<b>{guild?.name ?? server.name}</b>}
+                    label={<>
+                        <b>{guild?.name ?? server.name}</b>
+                        {owner && ` by @${owner.username}`}
+                    </>}
                     leadingAccessory={iconUrl ? { type: "image", src: iconUrl } : undefined}
                     icon={PencilIcon}
                     action={() => openPluginModal(plugins[server.name])}
