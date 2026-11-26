@@ -51,6 +51,8 @@ export const PATTERNS = {
 
     /** Discord interaction type for submitting a bot's form. */
     modalSubmitInteraction: 5,
+    /** Optional plugin with a clipboard copy that works while Discord isn't focused. */
+    nativeUtils: "NativeUtils",
     /** Discord's "too many requests" status; the error body carries `retry_after` in seconds. */
     rateLimitedStatus: 429,
     /** Longest rate limit wait before one retry; longer ones fail, since the form wait times out after 15 s. */
