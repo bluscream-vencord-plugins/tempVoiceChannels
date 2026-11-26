@@ -649,7 +649,7 @@ export default definePlugin({
             pending.resolve("unsupported");
             return false;
         }
-        RestAPI.post({
+        const submit = (retried: boolean) => RestAPI.post({
             url: Constants.Endpoints.INTERACTIONS,
             body: {
                 type: PATTERNS.modalSubmitInteraction,
@@ -662,11 +662,18 @@ export default definePlugin({
             }
         }).then(
             () => pending.resolve("sent"),
-            err => {
+            (err: { status?: number; body?: { retry_after?: number; }; }) => {
+                const retryAfter = err?.status === PATTERNS.rateLimitedStatus ? err.body?.retry_after : undefined;
+                if (!retried && retryAfter !== undefined && retryAfter * 1000 <= PATTERNS.maxRateLimitWaitMs) {
+                    logger.info(`Form submit rate limited, retrying in ${retryAfter}s`);
+                    setTimeout(() => submit(true), retryAfter * 1000 + PATTERNS.rateLimitPaddingMs);
+                    return;
+                }
                 logger.error("Form submit failed", err);
                 pending.resolve("failed");
             }
         );
+        submit(false);
         return true;
     },
 

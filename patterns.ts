@@ -51,6 +51,12 @@ export const PATTERNS = {
 
     /** Discord interaction type for submitting a bot's form. */
     modalSubmitInteraction: 5,
+    /** Discord's "too many requests" status; the error body carries `retry_after` in seconds. */
+    rateLimitedStatus: 429,
+    /** Longest rate limit wait before one retry; longer ones fail, since the form wait times out after 15 s. */
+    maxRateLimitWaitMs: 10_000,
+    /** Extra wait on top of `retry_after`, so the retry doesn't land right at the limit's edge. */
+    rateLimitPaddingMs: 250,
 
     /** How many recent messages to load when looking for a bot's message in a channel. */
     messageFetchLimit: 50,
