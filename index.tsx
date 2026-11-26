@@ -60,6 +60,11 @@ const settings = definePluginSettings({
         min: 100,
         max: 10_000
     },
+    keepRejoinable: {
+        type: OptionType.BOOLEAN,
+        description: "When you leave a channel you created, first make sure you can get back in, e.g. by making it public and raising its user limit. Leave again while that runs to leave right away.",
+        default: true
+    },
     presetOnManualCreate: {
         type: OptionType.BOOLEAN,
         description: "When you create a channel yourself by joining a create channel, apply the first preset for that create channel once the bot has moved you.",
@@ -112,6 +117,8 @@ export interface TempVoiceServer {
     otherIds?(userId: string): { id: string; source: string; }[];
     /** Runs when you join a channel that isn't your own new one and that has other people in it. */
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
+    /** Runs when you're about to leave a channel you created, while you're still in it, so you can rejoin later. */
+    beforeLeaveOwn?(api: TempVoiceApi, channelId: string): Promise<void>;
 }
 
 /**
@@ -200,6 +207,10 @@ let request: CreateRequest | null = null;
 /** Your new channel while its preset is applied; joins there aren't treated as joining someone else. */
 let settingUp: string | null = null;
 let lastVoiceChannel: string | null = null;
+/** Channels the bot said you created, this session. */
+const ownChannels = new Set<string>();
+/** Your channel while it's being made rejoinable before you leave it. */
+let leaving: string | null = null;
 const ownerLookups = new Set<string>();
 /**
  * Profile scans per channel, run one after another. A join flow holds its channel's queue until the server's
@@ -420,6 +431,7 @@ function onCreated(server: TempVoiceServer, creatorId: string, channelId: string
         const notice = await waitFor(find, PATTERNS.events.messageArrived, 20_000);
         if (myVoiceChannel() !== channelId) return;
         if (notice) {
+            ownChannels.add(channelId);
             if (preset) await server.applyPreset(api, channelId, preset);
             return;
         }
@@ -428,6 +440,34 @@ function onCreated(server: TempVoiceServer, creatorId: string, channelId: string
     }).finally(() => {
         if (settingUp === channelId) settingUp = null;
     });
+}
+
+interface VoiceChannelSelect {
+    [key: string]: unknown;
+    type: FluxEvents;
+    channelId?: string | null;
+}
+
+/** Leave actions that were held back and are now let through. */
+const released = new WeakSet<VoiceChannelSelect>();
+
+/** Holds back leaving your own channel until its server plugin made sure you can rejoin, then leaves as asked. */
+function interceptLeave(action: VoiceChannelSelect) {
+    if (action.type !== PATTERNS.voiceChannelSelect || !settings.store.keepRejoinable || released.has(action)) return false;
+    const current = myVoiceChannel();
+    if (!current || action.channelId === current || leaving === current || !ownChannels.has(current)) return false;
+    const server = managedServer(current);
+    if (!server?.beforeLeaveOwn) return false;
+
+    leaving = current;
+    showToast({ text: "Making sure you can get back into your channel before you leave." });
+    Promise.race([runFlow(server, current, api => server.beforeLeaveOwn?.(api, current) ?? Promise.resolve()), sleep(PATTERNS.leaveTimeoutMs)])
+        .finally(() => {
+            released.add(action);
+            if (myVoiceChannel() === current) FluxDispatcher.dispatch(action);
+            if (leaving === current) leaving = null;
+        });
+    return true;
 }
 
 async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: string, wait: boolean) {
@@ -630,9 +670,13 @@ export default definePlugin({
         // Without this, being in voice when the plugin starts would look like a fresh join.
         lastVoiceChannel = myVoiceChannel();
         loadRememberedIds(() => settings.store.rememberIds);
+        FluxDispatcher.addInterceptor(interceptLeave);
     },
 
     stop() {
+        const index = FluxDispatcher._interceptors.indexOf(interceptLeave);
+        if (index !== -1) FluxDispatcher._interceptors.splice(index, 1);
+        leaving = null;
         clearRequest();
         pendingModal?.resolve("timeout");
         pendingModal = null;

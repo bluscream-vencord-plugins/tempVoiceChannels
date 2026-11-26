@@ -62,6 +62,10 @@ export const PATTERNS = {
 
     /** How many recent messages to load when looking for a bot's message in a channel. */
     messageFetchLimit: 50,
+    /** Fired when you join, move or disconnect from voice; held back while your own channel is made rejoinable. */
+    voiceChannelSelect: "VOICE_CHANNEL_SELECT" satisfies FluxEvents,
+    /** The longest a leave is held back before you leave anyway. */
+    leaveTimeoutMs: 25_000,
 
     /** Discord message component types the plugins read or fill in. */
     componentTypes: {
