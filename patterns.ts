@@ -65,7 +65,9 @@ export const PATTERNS = {
     /** Fired when you join, move or disconnect from voice; held back while your own channel is made rejoinable. */
     voiceChannelSelect: "VOICE_CHANNEL_SELECT" satisfies FluxEvents,
     /** The longest a leave is held back before you leave anyway. */
-    leaveTimeoutMs: 25_000,
+    leaveTimeoutMs: 12_000,
+    /** How long to wait for the bot to move you into a channel you asked to create. */
+    createTimeoutMs: 20_000,
 
     /** Discord message component types the plugins read or fill in. */
     componentTypes: {

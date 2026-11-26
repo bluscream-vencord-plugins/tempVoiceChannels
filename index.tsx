@@ -60,6 +60,21 @@ const settings = definePluginSettings({
         min: 100,
         max: 10_000
     },
+    channelCreateMenu: {
+        type: OptionType.BOOLEAN,
+        description: "Show \"Create channel\" when right-clicking a create channel or its category.",
+        default: true
+    },
+    serverCreateMenu: {
+        type: OptionType.BOOLEAN,
+        description: "Show \"Create channel\" when right-clicking the server icon or name.",
+        default: true
+    },
+    copyIdMenu: {
+        type: OptionType.BOOLEAN,
+        description: "Show \"Copy ID\" when right-clicking someone on a server with a temp voice plugin.",
+        default: true
+    },
     keepRejoinable: {
         type: OptionType.BOOLEAN,
         description: "When you leave a channel you created, first make sure you can get back in, e.g. by making it public and raising its user limit. Leave again while that runs to leave right away.",
@@ -117,8 +132,13 @@ export interface TempVoiceServer {
     otherIds?(userId: string): { id: string; source: string; }[];
     /** Runs when you join a channel that isn't your own new one and that has other people in it. */
     onJoinOthers?(api: TempVoiceApi, channelId: string, others: string[]): Promise<void>;
-    /** Runs when you're about to leave a channel you created, while you're still in it, so you can rejoin later. */
-    beforeLeaveOwn?(api: TempVoiceApi, channelId: string): Promise<void>;
+    /** Whether the bot treats this user as the channel's owner, e.g. from a permission it gives owners. Covers transfers and channels from before a reload. */
+    isOwner?(channel: Channel, userId: string): boolean;
+    /**
+     * Called right when you leave a channel you own. Return a flow that runs while you're still in it, so you can
+     * rejoin later, or null when nothing needs doing (then the leave isn't held back at all).
+     */
+    prepareLeave?(channel: Channel): ((api: TempVoiceApi) => Promise<void>) | null;
 }
 
 /**
@@ -136,6 +156,8 @@ export interface TempVoiceApi {
     /** Resolves true once the bot applied the form, false after telling you it didn't. */
     submitModal(panel: Message, button: string, modalId: string, values: ModalValues, applied: () => boolean, what: string): Promise<boolean>;
     setStatus(status: string): Promise<void>;
+    /** Resolves true once check() holds after a channel update, false after ms. */
+    waitUntil(check: () => boolean, ms: number): Promise<boolean>;
 }
 
 const servers = new Map<string, TempVoiceServer>();
@@ -198,7 +220,7 @@ interface PendingModal {
 interface CreateRequest {
     server: TempVoiceServer;
     preset: Preset;
-    timer: ReturnType<typeof setTimeout>;
+    timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 let pendingModal: PendingModal | null = null;
@@ -207,10 +229,8 @@ let request: CreateRequest | null = null;
 /** Your new channel while its preset is applied; joins there aren't treated as joining someone else. */
 let settingUp: string | null = null;
 let lastVoiceChannel: string | null = null;
-/** Channels the bot said you created, this session. */
+/** Channels the bot said you created, this session. Only used for servers without isOwner. */
 const ownChannels = new Set<string>();
-/** Your channel while it's being made rejoinable before you leave it. */
-let leaving: string | null = null;
 const ownerLookups = new Set<string>();
 /**
  * Profile scans per channel, run one after another. A join flow holds its channel's queue until the server's
@@ -264,11 +284,11 @@ function waitFor<T>(check: () => T | null | undefined, events: FluxEvents[], tim
 /** Thrown inside a flow to stop it quietly. */
 class FlowCancelled extends Error { }
 
-function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
+function makeApi(server: TempVoiceServer, channelId: string, alive: () => boolean): TempVoiceApi {
     const serverLogger = new Logger(server.name);
 
     const ensureAlive = () => {
-        if (servers.get(server.name) !== server || myVoiceChannel() !== channelId) throw new FlowCancelled();
+        if (servers.get(server.name) !== server || myVoiceChannel() !== channelId || !alive()) throw new FlowCancelled();
     };
     const waitAlive = async <T,>(check: () => T | null | undefined, events: FluxEvents[], ms: number) => {
         const value = await waitFor(check, events, ms);
@@ -374,6 +394,10 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
             return false;
         },
 
+        async waitUntil(check, ms) {
+            return !!await waitAlive(() => check() || null, PATTERNS.events.channelUpdated, ms);
+        },
+
         async setStatus(status) {
             await RestAPI.put({ url: Constants.Endpoints.UPDATE_VOICE_CHANNEL_STATUS(channelId), body: { status } })
                 .catch(err => {
@@ -386,9 +410,9 @@ function makeApi(server: TempVoiceServer, channelId: string): TempVoiceApi {
 }
 
 /** Runs one flow, stopping quietly when it was cancelled and reporting anything else that went wrong. */
-async function runFlow(server: TempVoiceServer, channelId: string, flow: (api: TempVoiceApi) => Promise<void>) {
+async function runFlow(server: TempVoiceServer, channelId: string, flow: (api: TempVoiceApi) => Promise<void>, alive = () => true) {
     try {
-        await flow(makeApi(server, channelId));
+        await flow(makeApi(server, channelId, alive));
     } catch (err) {
         if (err instanceof FlowCancelled) return;
         logger.error(`${server.name} failed`, err);
@@ -402,13 +426,20 @@ function createChannel(server: TempVoiceServer, preset: Preset) {
     if (!ChannelStore.getChannel(preset.creatorId)) return fail(`The create channel for ${presetTitle(preset)} doesn't exist anymore.`);
     if (myVoiceChannel() === preset.creatorId) return fail("You're already in that create channel. Leave it and try again.");
 
+    request = { server, preset, timer: undefined };
+    armRequestTimer();
+    ChannelActions.selectVoiceChannel(preset.creatorId);
+}
+
+function armRequestTimer() {
+    if (!request) return;
+    clearTimeout(request.timer);
     const timer = setTimeout(() => {
         if (request?.timer !== timer) return;
         request = null;
         fail("The bot didn't move you to a new channel.");
-    }, 20_000);
-    request = { server, preset, timer };
-    ChannelActions.selectVoiceChannel(preset.creatorId);
+    }, PATTERNS.createTimeoutMs);
+    request.timer = timer;
 }
 
 function clearRequest() {
@@ -448,26 +479,65 @@ interface VoiceChannelSelect {
     channelId?: string | null;
 }
 
+/** A leave held back while your channel is made rejoinable. Leaving again meanwhile cancels it. */
+interface Hold {
+    channelId: string;
+    action: VoiceChannelSelect;
+    cancelled: boolean;
+}
+
+let hold: Hold | null = null;
 /** Leave actions that were held back and are now let through. */
 const released = new WeakSet<VoiceChannelSelect>();
 
-/** Holds back leaving your own channel until its server plugin made sure you can rejoin, then leaves as asked. */
-function interceptLeave(action: VoiceChannelSelect) {
+function releaseHold(held: Hold) {
+    if (hold !== held) return;
+    hold = null;
+    if (held.cancelled || myVoiceChannel() !== held.channelId) return;
+    released.add(held.action);
+    FluxDispatcher.dispatch(held.action);
+    // The hold may have eaten into the wait for the bot to move you into a channel you asked to create.
+    if (request) armRequestTimer();
+}
+
+function holdLeave(action: VoiceChannelSelect) {
     if (action.type !== PATTERNS.voiceChannelSelect || !settings.store.keepRejoinable || released.has(action)) return false;
     const current = myVoiceChannel();
-    if (!current || action.channelId === current || leaving === current || !ownChannels.has(current)) return false;
+    if (!current || action.channelId === current) return false;
+    if (hold) {
+        if (hold.channelId === current) hold.cancelled = true;
+        return false;
+    }
+    if (settingUp === current) return false;
     const server = managedServer(current);
-    if (!server?.beforeLeaveOwn) return false;
+    const channel = ChannelStore.getChannel(current);
+    if (!server?.prepareLeave || !channel) return false;
+    const me = UserStore.getCurrentUser().id;
+    if (!(server.isOwner ? server.isOwner(channel, me) : ownChannels.has(current))) return false;
+    const prepare = server.prepareLeave(channel);
+    if (!prepare) return false;
 
-    leaving = current;
-    showToast({ text: "Making sure you can get back into your channel before you leave." });
-    Promise.race([runFlow(server, current, api => server.beforeLeaveOwn?.(api, current) ?? Promise.resolve()), sleep(PATTERNS.leaveTimeoutMs)])
-        .finally(() => {
-            released.add(action);
-            if (myVoiceChannel() === current) FluxDispatcher.dispatch(action);
-            if (leaving === current) leaving = null;
-        });
+    const held: Hold = { channelId: current, action, cancelled: false };
+    hold = held;
+    showToast({ text: "Making sure you can get back into your channel before you leave. Leave again to skip this." });
+    Promise.race([
+        runFlow(server, current, prepare, () => !held.cancelled).then(() => false),
+        sleep(PATTERNS.leaveTimeoutMs).then(() => true)
+    ]).then(timedOut => {
+        if (timedOut && !held.cancelled) fail("Getting your channel ready took too long, so you left without it.");
+    }).finally(() => releaseHold(held));
     return true;
+}
+
+/** Holds back leaving your own channel until its server plugin made sure you can rejoin, then leaves as asked. */
+function interceptLeave(action: VoiceChannelSelect) {
+    // A throw here would block every voice channel change, so let the leave through instead.
+    try {
+        return holdLeave(action);
+    } catch (err) {
+        logger.error("Checking a voice channel leave failed", err);
+        return false;
+    }
 }
 
 async function joinFlow(server: TempVoiceServer, api: TempVoiceApi, channelId: string, wait: boolean) {
@@ -559,7 +629,7 @@ function createMenu(server: TempVoiceServer, presets: Preset[], withCreator: boo
 
 const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { channel?: Channel; }) => {
     const server = serverFor(channel?.guild_id);
-    if (!channel || !server) return;
+    if (!channel || !server || !settings.store.channelCreateMenu) return;
     const presets = presetsOf(server).filter(p => p.creatorId === channel.id || ChannelStore.getChannel(p.creatorId)?.parent_id === channel.id);
     if (isCreatorChannel(channel) || presets.length) children.push(<Menu.MenuSeparator />, createMenu(server, presets, false));
 };
@@ -569,7 +639,7 @@ const channelMenu: NavContextMenuPatchCallback = (children, { channel }: { chann
  * menu was opened in; remembered IDs show anywhere. Reads caches only, so opening the menu stores nothing.
  */
 const userMenu: NavContextMenuPatchCallback = (children, { user, guildId }: { user?: User; guildId?: string; }) => {
-    if (!user || user.bot || user.id === UserStore.getCurrentUser().id) return;
+    if (!user || user.bot || user.id === UserStore.getCurrentUser().id || !settings.store.copyIdMenu) return;
     const voiceChannel = VoiceStateStore.getVoiceStateForUser(user.id)?.channelId;
     const server = serverFor(voiceChannel ? ChannelStore.getChannel(voiceChannel)?.guild_id : undefined) ?? serverFor(guildId);
 
@@ -609,7 +679,7 @@ const userMenu: NavContextMenuPatchCallback = (children, { user, guildId }: { us
 
 const guildMenu: NavContextMenuPatchCallback = (children, { guild }: { guild?: Guild; }) => {
     const server = serverFor(guild?.id);
-    if (server) children.push(<Menu.MenuSeparator />, createMenu(server, presetsOf(server), true));
+    if (server && settings.store.serverCreateMenu) children.push(<Menu.MenuSeparator />, createMenu(server, presetsOf(server), true));
 };
 
 function serverHeading(server: TempVoiceServer) {
@@ -676,7 +746,12 @@ export default definePlugin({
     stop() {
         const index = FluxDispatcher._interceptors.indexOf(interceptLeave);
         if (index !== -1) FluxDispatcher._interceptors.splice(index, 1);
-        leaving = null;
+        if (hold) {
+            const held = hold;
+            releaseHold(held);
+            held.cancelled = true;
+        }
+        ownChannels.clear();
         clearRequest();
         pendingModal?.resolve("timeout");
         pendingModal = null;
